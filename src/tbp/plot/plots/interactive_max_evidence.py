@@ -516,7 +516,7 @@ class PlotWidgetOps:
             target["primary_target_object"],
             target["primary_target_rotation_quat"],
         )
-        target_rotation = Rotation.from_quat(target_rotation)
+        target_rotation = Rotation.from_quat(target_rotation, scalar_first=True)
 
         # Get evidence values
         evidence = self.data_parser.extract(self._locators["evidence"])
