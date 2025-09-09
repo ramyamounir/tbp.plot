@@ -709,7 +709,7 @@ class PlotWidgetOps:
 
         fig, ax = plt.subplots(figsize=(9, 4.5))
 
-        # Single-color palette for all lines but keep hue to get separate line objects if needed
+        # Single-color palette for all lines but keep hue to get separate line objects
         palette = dict.fromkeys(top_hyps, "C0")
         g = sns.lineplot(
             data=plot_df,
@@ -727,14 +727,107 @@ class PlotWidgetOps:
         ax.axvline(step, linestyle="--", color="black", linewidth=1)
 
         ax.set_xlabel("step")
-        ax.set_ylabel(f"EMA of Δevidence (alpha={alpha:g})")
-        ax.set_title(f"Top-{len(top_hyps)} hypotheses at step {step} by EMA(Δevidence)")
+        ax.set_ylabel(f"EMA with (alpha={alpha:g})")
+        ax.set_title(f"Top-{len(top_hyps)} hypotheses at step {step} by EMA")
         leg = ax.get_legend()
         if leg:
             leg.remove()
         plt.tight_layout()
 
         widget = Image(g.figure)
+        plt.close(g.figure)
+        self.plotter.add(widget)
+        return widget
+
+    def add_correlation_ema_plot(self, step: int, alpha: float) -> Image:
+        """Create a seaborn joint scatter of EMA vs error for a given step.
+
+        The EMA is computed per hypothesis over per-step evidence increments:
+          delta[t] = evidence[t] - evidence[t-1], with t=0 using evidence[0].
+          ema[t]   = alpha * delta[t] + (1 - alpha) * ema[t-1]
+
+        Args:
+            step: Step index to filter the dataframe.
+            alpha: EMA smoothing factor in (0, 1].
+
+        Returns:
+            The Image widget for the correlation plot.
+        """
+        # Compute EMA(Δevidence) per hypothesis across steps
+        df_sorted = self.df.sort_values(["hypothesis", "step"]).copy()
+
+        # Per-step increase; first step's delta is the initial evidence
+        df_sorted["evidence_delta"] = (
+            df_sorted.groupby("hypothesis")["evidence"]
+            .apply(lambda s: s.diff().fillna(s))
+            .reset_index(level=0, drop=True)
+        )
+
+        # Recursive EMA over deltas
+        df_sorted["evidence_ema"] = (
+            df_sorted.groupby("hypothesis")["evidence_delta"]
+            .apply(lambda s: s.ewm(alpha=alpha, adjust=False).mean())
+            .reset_index(level=0, drop=True)
+        )
+
+        # Data at the requested step
+        df_step = df_sorted[df_sorted["step"] == step][
+            ["evidence_ema", "error"]
+        ].dropna()
+
+        # Build JointGrid
+        g = sns.JointGrid(data=df_step, x="evidence_ema", y="error", height=6, space=0)
+
+        base_color = "C0"
+
+        # Joint scatter
+        sns.scatterplot(
+            data=df_step,
+            x="evidence_ema",
+            y="error",
+            ax=g.ax_joint,
+            s=12,
+            alpha=0.7,
+            edgecolor="none",
+            color=base_color,
+            legend=False,
+        )
+
+        # Marginal KDEs
+        sns.kdeplot(
+            data=df_step,
+            x="evidence_ema",
+            ax=g.ax_marg_x,
+            fill=True,
+            alpha=0.2,
+            linewidth=0,
+            color=base_color,
+            legend=False,
+        )
+        sns.kdeplot(
+            data=df_step,
+            y="error",
+            ax=g.ax_marg_y,
+            fill=True,
+            alpha=0.2,
+            linewidth=0,
+            color=base_color,
+            legend=False,
+        )
+
+        # Remove any auto legends if present
+        for ax in (g.ax_joint, g.ax_marg_x, g.ax_marg_y):
+            leg = ax.get_legend()
+            if leg:
+                leg.remove()
+
+        # Labels/layout
+        g.ax_joint.set_xlabel(f"EMA, alpha={alpha:g}", labelpad=10)
+        g.ax_joint.set_ylabel("Pose Error", labelpad=10)
+        g.ax_joint.set_title(f"Correlation at step {step}")
+        g.figure.tight_layout()
+
+        widget = Image(g.figure).shift((150, 0, 0))
         plt.close(g.figure)
         self.plotter.add(widget)
         return widget
@@ -777,8 +870,10 @@ class PlotWidgetOps:
                     k=msgs_dict["topk"],
                     alpha=msgs_dict["alpha"],
                 )
-            # elif msgs_dict["visualization"] == "Correlation":
-            #     widget = self.add_correlation_plot(step=msgs_dict["step_number"])
+            elif msgs_dict["visualization"] == "Correlation":
+                widget = self.add_correlation_ema_plot(
+                    step=msgs_dict["step_number"], alpha=msgs_dict["alpha"]
+                )
 
         self.plotter.render()
         return widget, False
