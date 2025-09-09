@@ -332,7 +332,7 @@ class VisualizationWidgetOps:
         self.plotter = plotter
 
         self._add_kwargs = {
-            "pos": (0.9, 0.8),
+            "pos": (0.9, 0.9),
             "states": ["Evidence", "Correlation"],
             "c": ["w", "w"],
             "bc": ["dg", "db"],
@@ -397,7 +397,7 @@ class HeuristicWidgetOps:
         self.plotter = plotter
 
         self._add_kwargs = {
-            "pos": (0.9, 0.9),
+            "pos": (0.1, 0.9),
             "states": ["Max Evidence", "EMA"],
             "c": ["w", "w"],
             "bc": ["dg", "db"],
