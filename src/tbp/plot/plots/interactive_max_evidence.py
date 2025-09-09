@@ -163,7 +163,7 @@ class TopKWidgetOps:
             "xmin": 1,
             "xmax": 1000,
             "value": 1,
-            "pos": [(0.1, 0.1), (0.1, 0.9)],
+            "pos": [(0.1, 0.1), (0.1, 0.85)],
             "title": "Top-K",
         }
 
@@ -236,6 +236,95 @@ class TopKWidgetOps:
         return widget, False
 
 
+class AlphaWidgetOps:
+    """WidgetOps implementation for a EMA alpha."""
+
+    def __init__(self, plotter: Plotter) -> None:
+        self.plotter = plotter
+        self.updaters = [
+            WidgetUpdater(
+                topics=[TopicSpec("heuristic", required=True)],
+                callback=self.toggle_slider,
+            )
+        ]
+
+        self._add_kwargs = {
+            "xmin": 0.1,
+            "xmax": 1,
+            "value": 0.5,
+            "pos": [(0.85, 0.1), (0.85, 0.85)],
+            "title": "Alpha",
+        }
+
+    def add(self, callback: Callable) -> Slider2D:
+        """Create the slider widget and re-render.
+
+        Args:
+            callback: Function called with `(widget, event)` when the UI changes.
+
+        Returns:
+            The created `Slider2D` widget.
+        """
+        self.callback = callback
+        widget = self.plotter.add_slider(callback, **self._add_kwargs)
+        self.plotter.render()
+        return widget
+
+    def remove(self, widget: Slider2D) -> None:
+        """Remove the Button."""
+        widget.off()
+        self.plotter.remove(widget)
+        self.plotter.render()
+
+    def set_state(self, widget: Slider2D, value: int) -> None:
+        """Set the slider value.
+
+        Args:
+            widget: The slider widget.
+            value: Desired threshold (integer).
+        """
+        set_slider_state(widget, value)
+
+    def extract_state(self, widget: Slider2D) -> int:
+        """Read the current slider value.
+
+        Args:
+            widget: The slider widget.
+
+        Returns:
+            The current value as an integer.
+        """
+        return round(widget.GetRepresentation().GetValue(), 1)
+
+    def state_to_messages(self, state: int) -> Iterable[TopicMessage]:
+        """Convert the slider state to pubsub messages.
+
+        Args:
+            state: Current threshold value.
+
+        Returns:
+            A list with a single `TopicMessage` named `"age_threshold"`.
+        """
+        return [TopicMessage(name="alpha", value=state)]
+
+    def toggle_slider(
+        self, widget: Slider2D, msgs: list[TopicMessage]
+    ) -> tuple[Slider2D, bool]:
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+        msg = msgs_dict["heuristic"]
+
+        if msg == "EMA":
+            if widget is not None:
+                return widget, False
+            return self.add(self.callback), True
+        elif msg == "Max Evidence":
+            if widget is None:
+                return None, False
+            return self.remove(widget), False
+
+        return widget, False
+
+
 class VisualizationWidgetOps:
     """WidgetOps implementation for a visualization type button."""
 
@@ -243,7 +332,7 @@ class VisualizationWidgetOps:
         self.plotter = plotter
 
         self._add_kwargs = {
-            "pos": (0.85, 0.5),
+            "pos": (0.9, 0.8),
             "states": ["Evidence", "Correlation"],
             "c": ["w", "w"],
             "bc": ["dg", "db"],
@@ -301,6 +390,71 @@ class VisualizationWidgetOps:
         return messages
 
 
+class HeuristicWidgetOps:
+    """WidgetOps implementation for a Heuristic button."""
+
+    def __init__(self, plotter: Plotter):
+        self.plotter = plotter
+
+        self._add_kwargs = {
+            "pos": (0.9, 0.9),
+            "states": ["Max Evidence", "EMA"],
+            "c": ["w", "w"],
+            "bc": ["dg", "db"],
+            "size": 30,
+            "font": "Calco",
+            "bold": True,
+        }
+
+    def add(self, callback: Callable) -> Button:
+        """Create the button widget and re-render.
+
+        Args:
+            callback: Function called with `(widget, event)` on UI interaction.
+
+        Returns:
+            The created `vedo.Button`.
+        """
+        widget = self.plotter.add_button(callback, **self._add_kwargs)
+        self.plotter.render()
+        self.extract_state(widget)
+        return widget
+
+    def extract_state(self, widget: Button) -> str:
+        """Read the current button value.
+
+        Args:
+            widget: The Button widget.
+
+        Returns:
+            The current button state.
+        """
+        return widget.status()
+
+    def set_state(self, widget: Slider2D, value: str) -> None:
+        """Set the slider's value.
+
+        Args:
+            widget: Slider widget object.
+            value: Desired step index.
+        """
+        set_button_state(widget, value)
+
+    def state_to_messages(self, state: str) -> Iterable[TopicMessage]:
+        """Convert the button state to pubsub messages.
+
+        Args:
+            state: Current button state.
+
+        Returns:
+            A list with a single `TopicMessage` with the topic "primary_button" .
+        """
+        messages = [
+            TopicMessage(name="heuristic", value=state),
+        ]
+        return messages
+
+
 class PlotWidgetOps:
     """WidgetOps for a correlation scatter plot with selection highlighting."""
 
@@ -313,6 +467,8 @@ class PlotWidgetOps:
                     TopicSpec("step_number", required=True),
                     TopicSpec("topk", required=True),
                     TopicSpec("visualization", required=True),
+                    TopicSpec("heuristic", required=True),
+                    TopicSpec("alpha", required=True),
                 ],
                 callback=self.update_plot,
             )
@@ -507,6 +663,82 @@ class PlotWidgetOps:
         self.plotter.add(widget)
         return widget
 
+    def add_evidence_ema_plot(self, step: int, k: int, alpha: float) -> list[int]:
+        """Plot the top-k hypotheses at a specific step, then show those hypotheses.
+
+        Args:
+            step: Step index to rank hypotheses by evidence.
+            k: Number of top hypotheses to plot.
+            alpha: EMA alpha value.
+
+        Returns:
+            List of selected hypothesis IDs (length may be < k if fewer available).
+        """
+        # Ensure proper ordering for diffs/EMA
+        df_sorted = self.df.sort_values(["hypothesis", "step"]).copy()
+
+        # 1) Per-step evidence increase per hypothesis
+        #    For the first step of each hypothesis, delta = evidence (baseline gain).
+        df_sorted["evidence_delta"] = (
+            df_sorted.groupby("hypothesis")["evidence"]
+            .apply(lambda s: s.diff().fillna(s))
+            .reset_index(level=0, drop=True)
+        )
+
+        # 2) EMA over deltas per hypothesis
+        #    adjust=False gives the standard recursive EMA:
+        #      ema[t] = alpha * delta[t] + (1-alpha) * ema[t-1]
+        df_sorted["evidence_ema"] = (
+            df_sorted.groupby("hypothesis")["evidence_delta"]
+            .apply(lambda s: s.ewm(alpha=alpha, adjust=False).mean())
+            .reset_index(level=0, drop=True)
+        )
+
+        # 3) Select top-k hypotheses by EMA at the requested step
+        top_hyps = (
+            df_sorted.loc[df_sorted["step"] == step]
+            .sort_values("evidence_ema", ascending=False)
+            .head(k)["hypothesis"]
+            .tolist()
+        )
+
+        # 4) Plot only those hypotheses across all steps
+        plot_df = df_sorted[df_sorted["hypothesis"].isin(top_hyps)].sort_values(
+            ["hypothesis", "step"]
+        )
+
+        fig, ax = plt.subplots(figsize=(9, 4.5))
+
+        # Single-color palette for all lines but keep hue to get separate line objects if needed
+        palette = dict.fromkeys(top_hyps, "C0")
+        g = sns.lineplot(
+            data=plot_df,
+            x="step",
+            y="evidence_ema",
+            hue="hypothesis",
+            hue_order=top_hyps,
+            palette=palette,
+            marker="o",
+            errorbar=None,
+            ax=ax,
+        )
+
+        # Vertical marker at the selection step
+        ax.axvline(step, linestyle="--", color="black", linewidth=1)
+
+        ax.set_xlabel("step")
+        ax.set_ylabel(f"EMA of Δevidence (alpha={alpha:g})")
+        ax.set_title(f"Top-{len(top_hyps)} hypotheses at step {step} by EMA(Δevidence)")
+        leg = ax.get_legend()
+        if leg:
+            leg.remove()
+        plt.tight_layout()
+
+        widget = Image(g.figure)
+        plt.close(g.figure)
+        self.plotter.add(widget)
+        return widget
+
     def update_plot(
         self, widget: Image, msgs: list[TopicMessage]
     ) -> tuple[Image, bool]:
@@ -530,12 +762,23 @@ class PlotWidgetOps:
         if widget is not None:
             self.plotter.remove(widget)
 
-        if msgs_dict["visualization"] == "Evidence":
-            widget = self.add_evidence_plot(
-                step=msgs_dict["step_number"], k=msgs_dict["topk"]
-            )
-        elif msgs_dict["visualization"] == "Correlation":
-            widget = self.add_correlation_plot(step=msgs_dict["step_number"])
+        if msgs_dict["heuristic"] == "Max Evidence":
+            if msgs_dict["visualization"] == "Evidence":
+                widget = self.add_evidence_plot(
+                    step=msgs_dict["step_number"], k=msgs_dict["topk"]
+                )
+            elif msgs_dict["visualization"] == "Correlation":
+                widget = self.add_correlation_plot(step=msgs_dict["step_number"])
+
+        elif msgs_dict["heuristic"] == "EMA":
+            if msgs_dict["visualization"] == "Evidence":
+                widget = self.add_evidence_ema_plot(
+                    step=msgs_dict["step_number"],
+                    k=msgs_dict["topk"],
+                    alpha=msgs_dict["alpha"],
+                )
+            # elif msgs_dict["visualization"] == "Correlation":
+            #     widget = self.add_correlation_plot(step=msgs_dict["step_number"])
 
         self.plotter.render()
         return widget, False
@@ -608,7 +851,9 @@ class InteractivePlot:
             w.add()
         self._widgets["step_slider"].set_state(0)
         self._widgets["topk_slider"].set_state(1)
+        self._widgets["alpha_slider"].set_state(0.5)
         self._widgets["visualization_button"].set_state("Evidence")
+        self._widgets["heuristic_button"].set_state("Max Evidence")
 
         self.plotter.show(interactive=True, resetcam=False, camera=self.cam_dict())
 
@@ -647,6 +892,22 @@ class InteractivePlot:
 
         widgets["visualization_button"] = Widget[Button, str](
             widget_ops=VisualizationWidgetOps(plotter=self.plotter),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.5,
+            dedupe=True,
+        )
+
+        widgets["heuristic_button"] = Widget[Button, str](
+            widget_ops=HeuristicWidgetOps(plotter=self.plotter),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.5,
+            dedupe=True,
+        )
+
+        widgets["alpha_slider"] = Widget[Slider2D, float](
+            widget_ops=AlphaWidgetOps(plotter=self.plotter),
             bus=self.event_bus,
             scheduler=self.scheduler,
             debounce_sec=0.5,
