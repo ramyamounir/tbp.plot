@@ -15,17 +15,19 @@ from pathlib import Path
 from typing import Any
 
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import seaborn as sns
 from pandas import DataFrame, Series
 from pubsub.core import Publisher
 from scipy.spatial.transform import Rotation
-from vedo import Button, Image, Plotter, Slider2D
+from vedo import Button, Image, Line, Plotter, Slider2D, Sphere
 
 from tbp.interactive.data import (
     DataLocator,
     DataLocatorStep,
     DataParser,
+    YCBMeshLoader,
 )
 from tbp.interactive.topics import TopicMessage, TopicSpec
 from tbp.interactive.widget_updaters import WidgetUpdater
@@ -76,7 +78,7 @@ class StepSliderWidgetOps:
             "xmin": 0,
             "xmax": 10,
             "value": 0,
-            "pos": [(0.1, 0.1), (0.9, 0.1)],
+            "pos": [(0.3, 0.1), (0.7, 0.1)],
             "title": "Step",
         }
         self._locators = self.create_locators()
@@ -110,8 +112,8 @@ class StepSliderWidgetOps:
         kwargs = deepcopy(self._add_kwargs)
         locator = self._locators["step"]
         kwargs.update({"xmax": len(self.data_parser.query(locator)) - 1})
-        widget = self.plotter.add_slider(callback, **kwargs)
-        self.plotter.render()
+        widget = self.plotter.at(0).add_slider(callback, **kwargs)
+        self.plotter.at(0).render()
         return widget
 
     def extract_state(self, widget: Slider2D) -> int:
@@ -177,15 +179,15 @@ class TopKWidgetOps:
             The created `Slider2D` widget.
         """
         self.callback = callback
-        widget = self.plotter.add_slider(callback, **self._add_kwargs)
-        self.plotter.render()
+        widget = self.plotter.at(0).add_slider(callback, **self._add_kwargs)
+        self.plotter.at(0).render()
         return widget
 
     def remove(self, widget: Slider2D) -> None:
         """Remove the Button."""
         widget.off()
-        self.plotter.remove(widget)
-        self.plotter.render()
+        self.plotter.at(0).remove(widget)
+        self.plotter.at(0).render()
 
     def set_state(self, widget: Slider2D, value: int) -> None:
         """Set the slider value.
@@ -266,15 +268,15 @@ class AlphaWidgetOps:
             The created `Slider2D` widget.
         """
         self.callback = callback
-        widget = self.plotter.add_slider(callback, **self._add_kwargs)
-        self.plotter.render()
+        widget = self.plotter.at(0).add_slider(callback, **self._add_kwargs)
+        self.plotter.at(0).render()
         return widget
 
     def remove(self, widget: Slider2D) -> None:
         """Remove the Button."""
         widget.off()
-        self.plotter.remove(widget)
-        self.plotter.render()
+        self.plotter.at(0).remove(widget)
+        self.plotter.at(0).render()
 
     def set_state(self, widget: Slider2D, value: int) -> None:
         """Set the slider value.
@@ -332,7 +334,7 @@ class VisualizationWidgetOps:
         self.plotter = plotter
 
         self._add_kwargs = {
-            "pos": (0.9, 0.9),
+            "pos": (0.9, 0.1),
             "states": ["Evidence", "Correlation"],
             "c": ["w", "w"],
             "bc": ["dg", "db"],
@@ -350,8 +352,8 @@ class VisualizationWidgetOps:
         Returns:
             The created `vedo.Button`.
         """
-        widget = self.plotter.add_button(callback, **self._add_kwargs)
-        self.plotter.render()
+        widget = self.plotter.at(0).add_button(callback, **self._add_kwargs)
+        self.plotter.at(0).render()
         self.extract_state(widget)
         return widget
 
@@ -397,7 +399,7 @@ class HeuristicWidgetOps:
         self.plotter = plotter
 
         self._add_kwargs = {
-            "pos": (0.1, 0.9),
+            "pos": (0.1, 0.1),
             "states": ["Max Evidence", "EMA"],
             "c": ["w", "w"],
             "bc": ["dg", "db"],
@@ -415,8 +417,8 @@ class HeuristicWidgetOps:
         Returns:
             The created `vedo.Button`.
         """
-        widget = self.plotter.add_button(callback, **self._add_kwargs)
-        self.plotter.render()
+        widget = self.plotter.at(0).add_button(callback, **self._add_kwargs)
+        self.plotter.at(0).render()
         self.extract_state(widget)
         return widget
 
@@ -476,6 +478,7 @@ class PlotWidgetOps:
         self._locators = self.create_locators()
 
         self.df: DataFrame = self.generate_df()
+        self.hyp_id = None
 
     def create_locators(self) -> dict[str, DataLocator]:
         """Create and return data locators used by this widget.
@@ -589,9 +592,13 @@ class PlotWidgetOps:
         ax.get_legend().remove()
         plt.tight_layout()
 
+        step_slice = self.df.loc[self.df["step"] == step, ["evidence", "hypothesis"]]
+        self.hyp_id = step_slice.loc[step_slice["evidence"].idxmax(), "hypothesis"]
+
         widget = Image(g.figure)
         plt.close(g.figure)
-        self.plotter.add(widget)
+        self.plotter.at(0).add(widget)
+
         return widget
 
     def add_correlation_plot(self, step: int) -> Image:
@@ -658,9 +665,12 @@ class PlotWidgetOps:
         g.ax_joint.set_title(f"Correlation at step {step}")
         g.figure.tight_layout()
 
+        step_slice = self.df.loc[self.df["step"] == step, ["evidence", "hypothesis"]]
+        self.hyp_id = step_slice.loc[step_slice["evidence"].idxmax(), "hypothesis"]
+
         widget = Image(g.figure).shift((150, 0, 0))
         plt.close(g.figure)
-        self.plotter.add(widget)
+        self.plotter.at(0).add(widget)
         return widget
 
     def add_evidence_ema_plot(self, step: int, k: int, alpha: float) -> list[int]:
@@ -734,9 +744,14 @@ class PlotWidgetOps:
             leg.remove()
         plt.tight_layout()
 
+        step_slice = df_sorted.loc[
+            df_sorted["step"] == step, ["hypothesis", "evidence_ema"]
+        ]
+        self.hyp_id = step_slice.loc[step_slice["evidence_ema"].idxmax(), "hypothesis"]
+
         widget = Image(g.figure)
         plt.close(g.figure)
-        self.plotter.add(widget)
+        self.plotter.at(0).add(widget)
         return widget
 
     def add_correlation_ema_plot(self, step: int, alpha: float) -> Image:
@@ -827,10 +842,29 @@ class PlotWidgetOps:
         g.ax_joint.set_title(f"Correlation at step {step}")
         g.figure.tight_layout()
 
+        step_slice = df_sorted.loc[
+            df_sorted["step"] == step, ["hypothesis", "evidence_ema"]
+        ]
+        self.hyp_id = step_slice.loc[step_slice["evidence_ema"].idxmax(), "hypothesis"]
+
         widget = Image(g.figure).shift((150, 0, 0))
         plt.close(g.figure)
-        self.plotter.add(widget)
+        self.plotter.at(0).add(widget)
         return widget
+
+    def state_to_messages(self, state: str) -> Iterable[TopicMessage]:
+        """Convert the button state to pubsub messages.
+
+        Args:
+            state: Current button state.
+
+        Returns:
+            A list with a single `TopicMessage` with the topic "hyp_id" .
+        """
+        messages = [
+            TopicMessage(name="hyp_id", value=self.hyp_id),
+        ]
+        return messages
 
     def update_plot(
         self, widget: Image, msgs: list[TopicMessage]
@@ -853,7 +887,7 @@ class PlotWidgetOps:
 
         # Add the scatter correlation plot to the scene
         if widget is not None:
-            self.plotter.remove(widget)
+            self.plotter.at(0).remove(widget)
 
         if msgs_dict["heuristic"] == "Max Evidence":
             if msgs_dict["visualization"] == "Evidence":
@@ -875,8 +909,8 @@ class PlotWidgetOps:
                     step=msgs_dict["step_number"], alpha=msgs_dict["alpha"]
                 )
 
-        self.plotter.render()
-        return widget, False
+        self.plotter.at(0).render()
+        return widget, True
 
 
 class ClickWidgetOps:
@@ -910,7 +944,7 @@ class ClickWidgetOps:
             callback: Function invoked like `(widget, event)` when a left-click
                 captures a 3D location.
         """
-        self.plotter.add_callback("RightButtonPress", self.on_left_click)
+        self.plotter.at(0).add_callback("RightButtonPress", self.on_left_click)
 
     def on_left_click(self, event):
         """Handle right mouse press (reset camera pose and render).
@@ -918,14 +952,250 @@ class ClickWidgetOps:
         Notes:
             Bound to the "RightButtonPress" event in `self.add()`.
         """
-        renderer = self.plotter.renderer
+        renderer = self.plotter.at(0).renderer
         if renderer is not None:
             cam = renderer.GetActiveCamera()
             cam.SetPosition(self.cam_dict["pos"])
             cam.SetFocalPoint(self.cam_dict["focal_point"])
             cam.SetViewUp((0, 1, 0))
             cam.SetClippingRange((0.01, 1000.01))
-            self.plotter.render()
+            self.plotter.at(0).render()
+
+
+class MeshWidgetOps:
+    def __init__(
+        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+    ) -> None:
+        self.plotter = plotter
+        self.data_parser = data_parser
+        self.ycb_loader = ycb_loader
+        self.gaze_line = None
+        self.sensor_circle = None
+
+        self.updaters = [
+            WidgetUpdater(
+                topics=[TopicSpec("step_number", required=True)],
+                callback=self.update_sensor,
+            )
+        ]
+
+        self._locators = self.create_locators()
+
+    def create_locators(self) -> dict[str, DataLocator]:
+        """Create and return data locators used by this widget.
+
+        Returns:
+            A dictionary with entries for `"target"` and `"evidence"`.
+        """
+        locators = {}
+
+        locators["target"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="target"),
+            ]
+        )
+
+        locators["steps_mask"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="lm_processed_steps"),
+            ]
+        )
+
+        locators["sensor_location"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="motor_system"),
+                DataLocatorStep.key(name="telemetry", value="action_sequence"),
+                DataLocatorStep.index(name="sm_step"),
+                DataLocatorStep.index(name="telemetry_type", value=1),
+                DataLocatorStep.key(name="agent", value="agent_id_0"),
+                DataLocatorStep.key(name="pose", value="position"),
+            ]
+        )
+
+        locators["patch_location"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="locations"),
+                DataLocatorStep.key(name="sm", value="patch"),
+                DataLocatorStep.index(name="step"),
+            ]
+        )
+
+        return locators
+
+    def add(self, callback: Callable) -> Slider2D:
+        target = self.data_parser.extract(self._locators["target"])
+        target_object, target_rotation, target_pos = (
+            target["primary_target_object"],
+            target["primary_target_rotation_euler"],
+            target["primary_target_position"],
+        )
+        mesh = self.ycb_loader.create_mesh(target_object).clone(deep=True)
+        mesh.rotate_x(target_rotation[0])
+        mesh.rotate_y(target_rotation[1])
+        mesh.rotate_z(target_rotation[2])
+        mesh.shift(*target_pos)
+
+        widget = self.plotter.at(1).add(mesh)
+        self.plotter.at(1).render()
+        return None
+
+    def update_sensor(
+        self, widget: None, msgs: list[TopicMessage]
+    ) -> tuple[None, bool]:
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+        step_number = msgs_dict["step_number"]
+
+        steps_mask = self.data_parser.extract(self._locators["steps_mask"])
+        mapping = np.flatnonzero(steps_mask)
+
+        sensor_pos = self.data_parser.extract(
+            self._locators["sensor_location"], sm_step=int(mapping[step_number])
+        )
+        patch_pos = self.data_parser.extract(
+            self._locators["patch_location"], step=step_number
+        )
+
+        if self.gaze_line is None:
+            self.gaze_line = Line(sensor_pos, patch_pos, c="black", lw=2)
+            self.plotter.at(1).add(self.gaze_line)
+        self.gaze_line.points = [sensor_pos, patch_pos]
+
+        if self.sensor_circle is None:
+            self.sensor_circle = Sphere(pos=sensor_pos, r=0.002)
+            self.plotter.at(1).add(self.sensor_circle)
+        self.sensor_circle.pos(sensor_pos)
+
+        self.plotter.at(1).render()
+
+        return widget, False
+
+
+class MLHWidgetOps:
+    def __init__(
+        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+    ) -> None:
+        self.plotter = plotter
+        self.data_parser = data_parser
+        self.ycb_loader = ycb_loader
+        self.object_mesh = None
+        self.location_circle = None
+
+        self.updaters = [
+            WidgetUpdater(
+                topics=[
+                    TopicSpec("step_number", required=True),
+                    TopicSpec("hyp_id", required=True),
+                ],
+                callback=self.update_object,
+            )
+        ]
+
+        self._locators = self.create_locators()
+
+    def create_locators(self) -> dict[str, DataLocator]:
+        """Create and return data locators used by this widget.
+
+        Returns:
+            A dictionary with entries for `"target"` and `"evidence"`.
+        """
+        locators = {}
+
+        locators["target"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="target"),
+            ]
+        )
+
+        locators["rotation"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="possible_rotations"),
+                DataLocatorStep.index(name="step", value=0),
+                DataLocatorStep.key(name="target_object"),
+                DataLocatorStep.index(name="hyp_id"),
+            ]
+        )
+
+        locators["location"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode", value="0"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="possible_locations"),
+                DataLocatorStep.index(name="step"),
+                DataLocatorStep.key(name="target_object"),
+                DataLocatorStep.index(name="hyp_id"),
+            ]
+        )
+
+        return locators
+
+    def add(self, callback: Callable) -> Slider2D:
+        target = self.data_parser.extract(self._locators["target"])
+        target_object, target_rotation, target_pos = (
+            target["primary_target_object"],
+            target["primary_target_rotation_euler"],
+            target["primary_target_position"],
+        )
+        self.object_mesh = self.ycb_loader.create_mesh(target_object).clone(deep=True)
+        self.object_mesh.rotate_x(target_rotation[0])
+        self.object_mesh.rotate_y(target_rotation[1])
+        self.object_mesh.rotate_z(target_rotation[2])
+        self.object_mesh.shift(*target_pos)
+
+        self.plotter.at(2).add(self.object_mesh)
+        self.plotter.at(2).render()
+        return None
+
+    def update_object(
+        self, widget: None, msgs: list[TopicMessage]
+    ) -> tuple[None, bool]:
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+        step_number = msgs_dict["step_number"]
+        hyp_id = msgs_dict["hyp_id"]
+
+        target = self.data_parser.extract(self._locators["target"])
+        target_object, target_pos = (
+            target["primary_target_object"],
+            target["primary_target_position"],
+        )
+
+        rotation = self.data_parser.extract(
+            self._locators["rotation"], target_object=target_object, hyp_id=hyp_id
+        )
+        rotation = Rotation.from_matrix(rotation).as_euler("xyz", degrees=True)
+
+        location = self.data_parser.extract(
+            self._locators["location"],
+            step=step_number,
+            target_object=target_object,
+            hyp_id=hyp_id,
+        )
+
+        if self.object_mesh is not None:
+            self.plotter.at(2).remove(self.object_mesh)
+        self.object_mesh = self.ycb_loader.create_mesh(target_object).clone(deep=True)
+        self.object_mesh.rotate_x(rotation[0])
+        self.object_mesh.rotate_y(rotation[1])
+        self.object_mesh.rotate_z(rotation[2])
+        self.object_mesh.shift(*target_pos)
+        self.plotter.at(2).add(self.object_mesh)
+
+        if self.location_circle is None:
+            self.location_circle = Sphere(pos=location, r=0.002).color("green")
+            self.plotter.at(2).add(self.location_circle)
+        self.location_circle.pos(location)
+
+        self.plotter.at(2).render()
+
+        return widget, False
 
 
 class InteractivePlot:
@@ -934,10 +1204,18 @@ class InteractivePlot:
     def __init__(
         self,
         exp_path: str,
+        data_path: str,
     ):
+        custom_view_areas = [
+            {"bottomleft": (0.0, 0.0), "topright": (1.0, 1.0)},
+            {"bottomleft": (0.0, 0.75), "topright": (0.25, 1.0)},
+            {"bottomleft": (0.75, 0.75), "topright": (1.0, 1.0)},
+        ]
+
         self.data_parser = DataParser(exp_path)
+        self.ycb_loader = YCBMeshLoader(data_path)
         self.event_bus = Publisher()
-        self.plotter = Plotter().render()
+        self.plotter = Plotter(shape=custom_view_areas, sharecam=False).render()
         self.scheduler = VtkDebounceScheduler(self.plotter.interactor, period_ms=33)
 
         # create and add the widgets to the plotter
@@ -950,7 +1228,30 @@ class InteractivePlot:
         self._widgets["visualization_button"].set_state("Evidence")
         self._widgets["heuristic_button"].set_state("Max Evidence")
 
-        self.plotter.show(interactive=True, resetcam=False, camera=self.cam_dict())
+        # self.plotter.show(interactive=True, resetcam=False, camera=self.cam_dict())
+
+        axes_dict = {
+            "xrange": (-0.05, 0.05),
+            "yrange": (1.45, 1.55),
+            "zrange": (-0.05, 0.05),
+        }
+
+        self.plotter.render()
+        self.plotter.at(0).show(
+            camera=self.cam_dict(),
+            resetcam=False,
+            interactive=False,
+        )
+        self.plotter.at(1).show(
+            axes=axes_dict,
+            resetcam=True,
+            interactive=False,
+        )
+        self.plotter.at(2).show(
+            axes=axes_dict,
+            resetcam=True,
+            interactive=True,
+        )
 
     def cam_dict(self) -> dict[str, tuple[float, float, float]]:
         """Returns camera parameters for an overhead view of the plot.
@@ -1027,6 +1328,30 @@ class InteractivePlot:
             dedupe=True,
         )
 
+        widgets["mesh_visualizer"] = Widget[None, None](
+            widget_ops=MeshWidgetOps(
+                plotter=self.plotter,
+                data_parser=self.data_parser,
+                ycb_loader=self.ycb_loader,
+            ),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.0,
+            dedupe=False,
+        )
+
+        widgets["mlh_visualizer"] = Widget[None, None](
+            widget_ops=MLHWidgetOps(
+                plotter=self.plotter,
+                data_parser=self.data_parser,
+                ycb_loader=self.ycb_loader,
+            ),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.0,
+            dedupe=False,
+        )
+
         return widgets
 
 
@@ -1034,12 +1359,13 @@ class InteractivePlot:
     "interactive_max_evidence",
     description="Max evidence plot",
 )
-def main(experiment_log_dir: str) -> int:
+def main(experiment_log_dir: str, objects_mesh_dir: str) -> int:
     """Interactive visualization for inspecting the max evidence update.
 
     Args:
         experiment_log_dir: Path to the experiment directory containing the detailed
             stats file.
+        objects_mesh_dir: Path to the root directory of YCB object meshes.
 
     Returns:
         Exit code.
@@ -1048,7 +1374,9 @@ def main(experiment_log_dir: str) -> int:
         logger.error(f"Experiment path not found: {experiment_log_dir}")
         return 1
 
-    InteractivePlot(experiment_log_dir)
+    data_path = str(Path(objects_mesh_dir).expanduser())
+
+    InteractivePlot(experiment_log_dir, data_path)
 
     return 0
 
@@ -1060,4 +1388,9 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
         help=(
             "The directory containing the experiment log with the detailed stats file."
         ),
+    )
+    p.add_argument(
+        "--objects_mesh_dir",
+        default="~/tbp/data/habitat/objects/ycb/meshes",
+        help=("The directory containing the mesh objects."),
     )
