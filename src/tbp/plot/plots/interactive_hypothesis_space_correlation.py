@@ -1263,6 +1263,40 @@ class CorrelationPlotWidgetOps:
         self.info_widget = Text2D(txt=text, pos="top-left")
         self.plotter.add(self.info_widget)
 
+    def pick_idx_slope_age_weighted(self, tau: float = 10.0) -> int:
+        """Return the DataFrame index label for the hypothesis to highlight.
+
+        Score = (Slope) * (1 - exp(-age / tau))
+
+        Args:
+            df: DataFrame with columns "Evidence" and "age".
+            tau: Age scale for confidence ramp. Larger tau slows down the ramp.
+        """
+        # age = np.minimum(self.df["age"].astype(float), 10)
+        slope = self.df["Evidence Slope"].astype(float)
+
+        # conf = 1 - np.exp(-age / tau)  # 0 when young, approaches 1 as age grows
+        # score = (slope / np.maximum(age, 1e-9)) * conf  # age-weighted Evidence/age
+
+        return slope.idxmax()
+
+    def pick_idx_age_weighted(self, tau: float = 10.0) -> int:
+        """Return the DataFrame index label for the hypothesis to highlight.
+
+        Score = (Evidence / age) * (1 - exp(-age / tau))
+
+        Args:
+            df: DataFrame with columns "Evidence" and "age".
+            tau: Age scale for confidence ramp. Larger tau slows down the ramp.
+        """
+        age = self.df["age"].astype(float)
+        ev = self.df["Evidence"].astype(float)
+
+        conf = 1 - np.exp(-age / tau)  # 0 when young, approaches 1 as age grows
+        score = (ev / np.maximum(age, 1e-9)) * conf  # age-weighted Evidence/age
+
+        return score.idxmax()
+
     def add_mlh_circle(self):
         """Adds the circle marker for the MLH."""
         if self.mlh_circle is not None:
@@ -1271,8 +1305,11 @@ class CorrelationPlotWidgetOps:
         if self.df.empty:
             return
 
-        (slope, error) = tuple(
-            self.df.loc[self.df["Evidence"].idxmax(), ["Evidence Slope", "Pose Error"]]
+        slope, error = tuple(
+            self.df.loc[
+                self.pick_idx_age_weighted(tau=5),
+                ["Evidence Slope", "Pose Error"],
+            ]
         )
 
         if pd.isna(slope):
