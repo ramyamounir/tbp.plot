@@ -1083,6 +1083,7 @@ class CorrelationPlotWidgetOps:
                         "Evidence Slope": np.array(updater_data["evidence_slopes"])[
                             removed_ids
                         ],
+                        "EMA": np.array(updater_data["evidence_ema"])[removed_ids],
                         "Rot_x": np.array(channel_data["rotations"])[removed_ids][:, 0],
                         "Rot_y": np.array(channel_data["rotations"])[removed_ids][:, 1],
                         "Rot_z": np.array(channel_data["rotations"])[removed_ids][:, 2],
@@ -1107,6 +1108,7 @@ class CorrelationPlotWidgetOps:
                         "Evidence Slope": np.array(updater_data["evidence_slopes"])[
                             added_ids
                         ],
+                        "EMA": np.array(updater_data["evidence_ema"])[added_ids],
                         "Rot_x": np.array(channel_data["rotations"])[added_ids][:, 0],
                         "Rot_y": np.array(channel_data["rotations"])[added_ids][:, 1],
                         "Rot_z": np.array(channel_data["rotations"])[added_ids][:, 2],
@@ -1129,6 +1131,7 @@ class CorrelationPlotWidgetOps:
                         "Evidence Slope": np.array(updater_data["evidence_slopes"])[
                             maintained_ids
                         ],
+                        "EMA": np.array(updater_data["evidence_ema"])[maintained_ids],
                         "Rot_x": np.array(channel_data["rotations"])[maintained_ids][
                             :, 0
                         ],
@@ -1297,6 +1300,12 @@ class CorrelationPlotWidgetOps:
 
         return score.idxmax()
 
+    def pick_idx_ema(self) -> int:
+        """Return the DataFrame index label for the hypothesis to highlight."""
+        score = self.df["EMA"].astype(float)
+
+        return score.idxmax()
+
     def add_mlh_circle(self):
         """Adds the circle marker for the MLH."""
         if self.mlh_circle is not None:
@@ -1305,9 +1314,16 @@ class CorrelationPlotWidgetOps:
         if self.df.empty:
             return
 
+        # slope, error = tuple(
+        #     self.df.loc[
+        #         self.pick_idx_age_weighted(tau=5),
+        #         ["Evidence Slope", "Pose Error"],
+        #     ]
+        # )
+
         slope, error = tuple(
             self.df.loc[
-                self.pick_idx_age_weighted(tau=5),
+                self.pick_idx_ema(),
                 ["Evidence Slope", "Pose Error"],
             ]
         )
@@ -1516,9 +1532,9 @@ class HypothesisMeshWidgetOps:
 
         # Add info text
         info = (
-            f"Object: {hypothesis['graph_id']}\n"
-            + f"Age: {hypothesis['age']}\n"
+            f"Age: {hypothesis['age']}\n"
             + f"Evidence: {hypothesis['Evidence']:.2f}\n"
+            + f"EMA: {hypothesis['EMA']:.2f}\n"
             + f"Evidence Slope: {hypothesis['Evidence Slope']:.2f}\n"
             + f"Pose Error: {hypothesis['Pose Error']:.2f}"
         )
@@ -1782,6 +1798,7 @@ class HypothesisLifespanWidgetOps:
             "evidence": channel_data["evidence"],
             "rotations": channel_data["rotations"],
             "evidence_slopes": updater_data["evidence_slopes"],
+            "evidence_ema": updater_data["evidence_ema"],
         }
 
     def _extract_mod_ids(
@@ -1920,6 +1937,7 @@ class HypothesisLifespanWidgetOps:
                 "Episode": int(episode),
                 "Step": int(step),
                 "Evidence": row_data["evidence"][ix],
+                "EMA": row_data["evidence_ema"][ix],
                 "Evidence Slopes": row_data["evidence_slopes"][ix],
             }
         ]
@@ -1950,6 +1968,7 @@ class HypothesisLifespanWidgetOps:
                     "Episode": int(episode_b),
                     "Step": int(step_b),
                     "Evidence": row_data["evidence"][idx_b],
+                    "EMA": row_data["evidence_ema"][idx_b],
                     "Evidence Slopes": row_data["evidence_slopes"][idx_b],
                 }
             )
@@ -1980,6 +1999,7 @@ class HypothesisLifespanWidgetOps:
                     "Episode": int(episode_f),
                     "Step": int(step_f),
                     "Evidence": row_data["evidence"][idx_f],
+                    "EMA": row_data["evidence_ema"][idx_f],
                     "Evidence Slopes": row_data["evidence_slopes"][idx_f],
                 }
             )
@@ -1988,7 +2008,7 @@ class HypothesisLifespanWidgetOps:
         rows = rows_back + row_current + rows_forward
 
         return DataFrame(
-            rows, columns=["Episode", "Step", "Evidence", "Evidence Slopes"]
+            rows, columns=["Episode", "Step", "Evidence", "EMA", "Evidence Slopes"]
         )
 
     def _add_lifespan_figure(
@@ -2045,14 +2065,14 @@ class HypothesisLifespanWidgetOps:
             ax=ax2,
             data=df,
             x="x",
-            y="Evidence Slopes",
+            y="EMA",
             marker="o",
             markersize=4,
             linewidth=1.2,
             color=HUE_PALETTE["Slope"],
-            label="Evidence Slope",
+            label="Evidence EMA",
         )
-        ax2.set_ylabel("Evidence Slope")
+        ax2.set_ylabel("Evidence EMA")
 
         # Setting ticks on x-axis
         x_min, x_max = df["x"].min(), df["x"].max()
