@@ -1054,9 +1054,13 @@ class MeshWidgetOps:
         steps_mask = self.data_parser.extract(self._locators["steps_mask"])
         mapping = np.flatnonzero(steps_mask)
 
-        sensor_pos = self.data_parser.extract(
-            self._locators["sensor_location"], sm_step=int(mapping[step_number])
-        )
+        try:
+            sensor_pos = self.data_parser.extract(
+                self._locators["sensor_location"], sm_step=int(mapping[step_number])
+            )
+        except:
+            return widget, False
+
         patch_pos = self.data_parser.extract(
             self._locators["patch_location"], step=step_number
         )
