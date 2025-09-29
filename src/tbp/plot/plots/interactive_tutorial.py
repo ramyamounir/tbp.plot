@@ -13,8 +13,9 @@ from collections.abc import Callable, Iterable
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 from pubsub.core import Publisher
-from vedo import Plotter, Slider2D
+from vedo import Circle, Line, Mesh, Plotter, Slider2D, Sphere, Text2D
 
 from tbp.interactive.data import (
     DataLocator,
@@ -270,6 +271,179 @@ class StepSliderWidgetOps:
         return widget, True
 
 
+class GtMeshWidgetOps:
+    """WidgetOps implementation for rendering the ground-truth target mesh.
+
+    This widget is display-only. It listens for `"episode_number"` updates,
+    loads the target object's YCB mesh, applies the episode-specific rotations,
+    scales and positions it, and adds it to the plotter. It does not publish
+    any messages.
+
+    Attributes:
+        plotter: A `vedo.Plotter` used to add and remove actors.
+        data_parser: A parser that extracts entries from the JSON log.
+        ycb_loader: Loader that returns a textured `vedo.Mesh` for a YCB object.
+        updaters: A single `WidgetUpdater` that reacts to `"episode_number"`.
+        _locators: Data accessors keyed by name for the parser.
+    """
+
+    def __init__(
+        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+    ):
+        self.plotter = plotter
+        self.data_parser = data_parser
+        self.ycb_loader = ycb_loader
+        self.updaters = [
+            WidgetUpdater(
+                topics=[TopicSpec("episode_number", required=True)],
+                callback=self.update_mesh,
+            ),
+            WidgetUpdater(
+                topics=[
+                    TopicSpec("episode_number", required=True),
+                    TopicSpec("step_number", required=True),
+                ],
+                callback=self.update_sensor,
+            ),
+        ]
+        self._locators = self.create_locators()
+
+        self.gaze_line: Line | None = None
+        self.sensor_circle: Circle | None = None
+
+        self.plotter.at(1).add(Text2D(txt="Ground Truth", pos="top-center"))
+
+    def create_locators(self) -> dict[str, DataLocator]:
+        """Create and return data locators used by this widget.
+
+        Returns:
+            A dictionary containing the created locators.
+        """
+        locators = {}
+        locators["target"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="lm", value="target"),
+            ]
+        )
+
+        locators["steps_mask"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="lm_processed_steps"),
+            ]
+        )
+
+        locators["sensor_location"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="system", value="motor_system"),
+                DataLocatorStep.key(name="telemetry", value="action_sequence"),
+                DataLocatorStep.index(name="sm_step"),
+                DataLocatorStep.index(name="telemetry_type", value=1),
+                DataLocatorStep.key(name="agent", value="agent_id_0"),
+                DataLocatorStep.key(name="pose", value="position"),
+            ]
+        )
+
+        locators["patch_location"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="locations"),
+                DataLocatorStep.key(name="sm", value="patch"),
+                DataLocatorStep.index(name="step"),
+            ]
+        )
+
+        return locators
+
+    def remove(self, widget: Mesh) -> None:
+        """Remove the mesh widget and re-render.
+
+        Args:
+            widget: The mesh widget to remove. If `None`, no action is taken.
+        """
+        if widget is not None:
+            self.plotter.at(1).remove(widget)
+            self.plotter.at(1).render()
+
+    def update_mesh(self, widget: Mesh, msgs: list[TopicMessage]) -> tuple[Mesh, bool]:
+        """Update the target mesh when the episode changes.
+
+        Removes any existing mesh, loads the episode's primary target object,
+        applies its Euler rotations, scales and positions it, then adds it to
+        the plotter.
+
+        Args:
+            widget: The currently displayed mesh, if any.
+            msgs: Messages received from the `WidgetUpdater`.
+
+        Returns:
+            A tuple `(mesh, False)`. The second value is `False` to indicate
+            that no publish should occur.
+        """
+        self.remove(widget)
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+
+        locator = self._locators["target"]
+        target = self.data_parser.extract(
+            locator, episode=str(msgs_dict["episode_number"])
+        )
+        target_id = target["primary_target_object"]
+        target_rot = target["primary_target_rotation_euler"]
+        target_pos = target["primary_target_position"]
+        widget = self.ycb_loader.create_mesh(target_id).clone(deep=True)
+        widget.rotate_x(target_rot[0])
+        widget.rotate_y(target_rot[1])
+        widget.rotate_z(target_rot[2])
+        widget.shift(*target_pos)
+
+        self.plotter.at(1).add(widget)
+        self.plotter.at(1).render()
+
+        return widget, False
+
+    def update_sensor(
+        self, widget: None, msgs: list[TopicMessage]
+    ) -> tuple[None, bool]:
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+        episode_number = msgs_dict["episode_number"]
+        step_number = msgs_dict["step_number"]
+
+        steps_mask = self.data_parser.extract(
+            self._locators["steps_mask"], episode=str(episode_number)
+        )
+        mapping = np.flatnonzero(steps_mask)
+
+        sensor_pos = self.data_parser.extract(
+            self._locators["sensor_location"],
+            episode=str(episode_number),
+            sm_step=int(mapping[step_number]),
+        )
+
+        patch_pos = self.data_parser.extract(
+            self._locators["patch_location"],
+            episode=str(episode_number),
+            step=step_number,
+        )
+
+        if self.sensor_circle is None:
+            self.sensor_circle = Sphere(pos=sensor_pos, r=0.01)
+            self.plotter.at(1).add(self.sensor_circle)
+        self.sensor_circle.pos(sensor_pos)
+
+        if self.gaze_line is None:
+            self.gaze_line = Line(sensor_pos, patch_pos, c="black", lw=2)
+            self.plotter.at(1).add(self.gaze_line)
+        self.gaze_line.points = [sensor_pos, patch_pos]
+
+        self.plotter.at(1).render()
+
+        return widget, False
+
+
 class InteractivePlot:
     """An interactive plot for a simple tutorial."""
 
@@ -341,7 +515,19 @@ class InteractivePlot:
             ),
             bus=self.event_bus,
             scheduler=self.scheduler,
-            debounce_sec=0.3,
+            debounce_sec=0.0,
+            dedupe=True,
+        )
+
+        widgets["primary_mesh"] = Widget[Mesh, None](
+            widget_ops=GtMeshWidgetOps(
+                plotter=self.plotter,
+                data_parser=self.data_parser,
+                ycb_loader=self.ycb_loader,
+            ),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.5,
             dedupe=True,
         )
 
