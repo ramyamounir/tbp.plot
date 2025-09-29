@@ -22,7 +22,8 @@ from tbp.interactive.data import (
     DataParser,
     YCBMeshLoader,
 )
-from tbp.interactive.topics import TopicMessage
+from tbp.interactive.topics import TopicMessage, TopicSpec
+from tbp.interactive.widget_updaters import WidgetUpdater
 from tbp.interactive.widgets import (
     VtkDebounceScheduler,
     Widget,
@@ -131,6 +132,144 @@ class EpisodeSliderWidgetOps:
         return messages
 
 
+class StepSliderWidgetOps:
+    """WidgetOps implementation for a Step slider.
+
+    This class listens for the current episode selection and adjusts the step
+    slider range to match the number of steps in that episode. It publishes
+    changes as `TopicMessage` items under the "step_number" topic.
+
+    Attributes:
+        plotter: A `vedo.Plotter` object to add or remove the slider and render.
+        data_parser: A parser that extracts or queries information from the
+            JSON log file.
+        updaters: A list with a single `WidgetUpdater` that reacts to the
+            `"episode_number"` topic and calls `update_slider_range`.
+        _add_kwargs: Default keyword arguments passed to `plotter.add_slider`.
+        _locators: Data accessors keyed by name that instruct the `DataParser`
+            how to retrieve the required information.
+    """
+
+    def __init__(self, plotter: Plotter, data_parser: DataParser) -> None:
+        self.plotter = plotter
+        self.data_parser = data_parser
+        self.updaters = [
+            WidgetUpdater(
+                topics=[TopicSpec("episode_number", required=True)],
+                callback=self.update_slider_range,
+            )
+        ]
+
+        self._add_kwargs = {
+            "xmin": 0,
+            "xmax": 10,
+            "value": 0,
+            "pos": [(0.1, 0.1), (0.9, 0.1)],
+            "title": "Step",
+        }
+        self._locators = self.create_locators()
+
+    def create_locators(self) -> dict[str, DataLocator]:
+        """Create and return data locators used by this widget.
+
+        Returns:
+            A dictionary containing the created locators.
+        """
+        locators = {}
+        locators["step"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="lm", value="LM_0"),
+                DataLocatorStep.key(
+                    name="telemetry", value="hypotheses_updater_telemetry"
+                ),
+                DataLocatorStep.index(name="step"),
+            ]
+        )
+        return locators
+
+    def add(self, callback: Callable) -> Slider2D:
+        """Create the slider widget.
+
+        Args:
+            callback: Function called with `(widget, event)` when the UI changes.
+
+        Returns:
+            The created `Slider2D` widget.
+        """
+        widget = self.plotter.at(0).add_slider(callback, **self._add_kwargs)
+        self.plotter.at(0).render()
+        return widget
+
+    def extract_state(self, widget: Slider2D) -> int:
+        """Read the current slider value.
+
+        Args:
+            widget: The slider widget.
+
+        Returns:
+            The current slider value rounded to the nearest integer.
+        """
+        return extract_slider_state(widget)
+
+    def set_state(self, widget: Slider2D, value: int) -> None:
+        """Set the slider's value.
+
+        Args:
+            widget: Slider widget object.
+            value: Desired step index.
+        """
+        set_slider_state(widget, value)
+
+    def state_to_messages(self, state: int) -> Iterable[TopicMessage]:
+        """Convert the slider state to pubsub messages.
+
+        Args:
+            state: Selected step index.
+
+        Returns:
+            A list with a single `TopicMessage` for the topic `"step_number"`.
+        """
+        messages = [TopicMessage(name="step_number", value=state)]
+        return messages
+
+    def update_slider_range(
+        self, widget: Slider2D, msgs: list[TopicMessage]
+    ) -> tuple[Slider2D, bool]:
+        """Adjust slider range based on the selected episode and reset to 0.
+
+        Looks up the `"episode_number"` message, queries the number of steps for
+        that episode, sets the slider range to `[0, num_steps - 1]`, resets the
+        value to 0, and re-renders.
+
+        Args:
+            widget: The slider widget to update.
+            msgs: Messages from the `WidgetUpdater`.
+
+        Returns:
+            A tuple `(widget, True)` indicating the updated widget and whether
+            a publish should occur.
+        """
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+
+        # set widget range to the correct step number
+        widget.range = [
+            0,
+            len(
+                self.data_parser.query(
+                    self._locators["step"], episode=str(msgs_dict["episode_number"])
+                )
+            )
+            - 1,
+        ]
+
+        # set slider value back to zero
+        self.set_state(widget, 0)
+        self.plotter.at(0).render()
+
+        return widget, True
+
+
 class InteractivePlot:
     """An interactive plot for a simple tutorial."""
 
@@ -191,8 +330,19 @@ class InteractivePlot:
             ),
             bus=self.event_bus,
             scheduler=self.scheduler,
-            debounce_sec=0.0,
-            dedupe=False,
+            debounce_sec=0.3,
+            dedupe=True,
+        )
+
+        widgets["step_slider"] = Widget[Slider2D, int](
+            widget_ops=StepSliderWidgetOps(
+                plotter=self.plotter,
+                data_parser=self.data_parser,
+            ),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.3,
+            dedupe=True,
         )
 
         return widgets
