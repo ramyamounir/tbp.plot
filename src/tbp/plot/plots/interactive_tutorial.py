@@ -444,6 +444,112 @@ class GtMeshWidgetOps:
         return widget, False
 
 
+class MlhMeshWidgetOps:
+    """WidgetOps implementation for rendering the MLH mesh.
+
+    This widget is display-only. It listens for `"episode_number"` updates,
+    loads the target object's YCB mesh, applies the episode-specific rotations,
+    scales and positions it, and adds it to the plotter. It does not publish
+    any messages.
+
+    Attributes:
+        plotter: A `vedo.Plotter` used to add and remove actors.
+        data_parser: A parser that extracts entries from the JSON log.
+        ycb_loader: Loader that returns a textured `vedo.Mesh` for a YCB object.
+        updaters: A single `WidgetUpdater` that reacts to `"episode_number"`.
+        _locators: Data accessors keyed by name for the parser.
+    """
+
+    def __init__(
+        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+    ):
+        self.plotter = plotter
+        self.data_parser = data_parser
+        self.ycb_loader = ycb_loader
+        self.updaters = [
+            WidgetUpdater(
+                topics=[
+                    TopicSpec("episode_number", required=True),
+                    TopicSpec("step_number", required=True),
+                ],
+                callback=self.update_mesh,
+            ),
+        ]
+        self._locators = self.create_locators()
+
+        self.default_object_position = (0, 1.5, 0)
+        self.sensor_circle: Circle | None = None
+
+        self.plotter.at(2).add(Text2D(txt="MLH", pos="top-center"))
+
+    def create_locators(self) -> dict[str, DataLocator]:
+        """Create and return data locators used by this widget.
+
+        Returns:
+            A dictionary containing the created locators.
+        """
+        locators = {}
+
+        locators["mlh"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="lm", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="current_mlh"),
+                DataLocatorStep.index(name="step"),
+            ]
+        )
+        return locators
+
+    def update_mesh(self, widget: Mesh, msgs: list[TopicMessage]) -> tuple[Mesh, bool]:
+        """Update the target mesh when the episode changes.
+
+        Removes any existing mesh, loads the episode's primary target object,
+        applies its Euler rotations, scales and positions it, then adds it to
+        the plotter.
+
+        Args:
+            widget: The currently displayed mesh, if any.
+            msgs: Messages received from the `WidgetUpdater`.
+
+        Returns:
+            A tuple `(mesh, False)`. The second value is `False` to indicate
+            that no publish should occur.
+        """
+        if widget is not None:
+            self.plotter.at(2).remove(widget)
+
+        if self.sensor_circle is not None:
+            self.plotter.at(2).remove(self.sensor_circle)
+            self.sensor_circle = None
+
+        msgs_dict = {msg.name: msg.value for msg in msgs}
+        mlh = self.data_parser.extract(
+            self._locators["mlh"],
+            episode=str(msgs_dict["episode_number"]),
+            step=msgs_dict["step_number"],
+        )
+        mlh_id = mlh["graph_id"]
+        mlh_rot = mlh["rotation"]
+        mlh_pos = mlh["location"]
+
+        # Add object_mesh
+        widget = self.ycb_loader.create_mesh(mlh_id).clone(deep=True)
+        widget.rotate_x(mlh_rot[0])
+        widget.rotate_y(mlh_rot[1])
+        widget.rotate_z(mlh_rot[2])
+        widget.shift(*self.default_object_position)
+
+        self.plotter.at(2).add(widget)
+
+        # Add sensor circle
+        self.sensor_circle = Sphere(pos=mlh_pos, r=0.01).c("green")
+        self.plotter.at(2).add(self.sensor_circle)
+
+        self.plotter.at(2).render()
+
+        return widget, False
+
+
 class InteractivePlot:
     """An interactive plot for a simple tutorial."""
 
@@ -515,12 +621,24 @@ class InteractivePlot:
             ),
             bus=self.event_bus,
             scheduler=self.scheduler,
-            debounce_sec=0.0,
+            debounce_sec=0.3,
             dedupe=True,
         )
 
         widgets["primary_mesh"] = Widget[Mesh, None](
             widget_ops=GtMeshWidgetOps(
+                plotter=self.plotter,
+                data_parser=self.data_parser,
+                ycb_loader=self.ycb_loader,
+            ),
+            bus=self.event_bus,
+            scheduler=self.scheduler,
+            debounce_sec=0.5,
+            dedupe=True,
+        )
+
+        widgets["Mlh_mesh"] = Widget[Mesh, None](
+            widget_ops=MlhMeshWidgetOps(
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 ycb_loader=self.ycb_loader,
