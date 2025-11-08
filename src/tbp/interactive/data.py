@@ -190,6 +190,13 @@ class DataParser:
         raise ValueError("No missing values to query")
 
 
+class ReadyDataParser(DataParser):
+    """Parser class that bypasses loading by injecting data directly."""
+
+    def __init__(self, data):
+        self.data = data
+
+
 @dataclass
 class DataLocatorStep:
     """One step in a data locator path.
