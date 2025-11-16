@@ -65,7 +65,7 @@ TARGET_LOC = DataLocator(
     ]
 )
 
-AVG_SLOPES_LOC = DataLocator(
+MAX_SLOPES_LOC = DataLocator(
     path=[
         DataLocatorStep.key(name="episode", value="0"),
         DataLocatorStep.key(name="lm", value="LM_0"),
@@ -74,7 +74,7 @@ AVG_SLOPES_LOC = DataLocator(
         DataLocatorStep.key(name="object", value="mug"),
         DataLocatorStep.key(name="channel", value="patch"),
         DataLocatorStep.key(name="telemetry2", value="hypotheses_updater"),
-        DataLocatorStep.key(name="telemetry3", value="avg_slopes"),
+        DataLocatorStep.key(name="telemetry3", value="max_slope"),
     ]
 )
 
@@ -146,8 +146,8 @@ def main(experiment_log_dir: str) -> int:
     added_hyp = get_added_bool(parser)
     pose_errors = parser.extract(POSE_ERROR_LOC)
     th_limit = parser.extract(TH_LIMIT_LOC)
-    avg_slopes = [
-        parser.extract(AVG_SLOPES_LOC, step=s) for s in parser.query(AVG_SLOPES_LOC)
+    max_slopes = [
+        parser.extract(MAX_SLOPES_LOC, step=s) for s in parser.query(MAX_SLOPES_LOC)
     ]
     hyp_space_sizes = get_hyp_space_sizes(parser)
 
@@ -156,7 +156,7 @@ def main(experiment_log_dir: str) -> int:
         == len(added_hyp)
         == len(pose_errors)
         == len(th_limit)
-        == len(avg_slopes)
+        == len(max_slopes)
         == len(hyp_space_sizes)
     )
 
@@ -164,7 +164,7 @@ def main(experiment_log_dir: str) -> int:
     added_hyp = np.asarray(added_hyp, dtype=bool)
     pose_errors = np.asarray(pose_errors, dtype=float)
     th_limit = np.asarray(th_limit, dtype=float)
-    slopes = np.asarray(avg_slopes, dtype=float)
+    slopes = np.asarray(max_slopes, dtype=float)
     hyp_space_sizes = np.asarray(hyp_space_sizes, dtype=float)
 
     pose_deg = np.rad2deg(pose_errors)
@@ -213,9 +213,9 @@ def main(experiment_log_dir: str) -> int:
             ymax,
             colors="red",
             linestyles="--",
-            alpha=0.25,
+            alpha=1.0,
             linewidth=1.0,
-            zorder=0,
+            zorder=1,
             label="Added hypotheses",
         )
 
