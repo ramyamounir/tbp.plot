@@ -179,7 +179,7 @@ def main(experiment_log_dir: str) -> int:
     mask = correct_mlh  # or: mask = np.isfinite(pose_deg) & correct_mlh
     if np.any(mask):
         ax_top.scatter(x[mask], pose_deg[mask], s=16, label="Pose error (correct)")
-    ax_top.set_ylim(0, 50)
+    ax_top.set_ylim(0, 180)
     ax_top.set_ylabel("Degrees")
     ax_top.legend(loc="best")
 
@@ -234,7 +234,7 @@ def main(experiment_log_dir: str) -> int:
         # f"No Sampling\nTotal: {np.sum(hyp_space_sizes)}"
         f"Burst Sampling\nTotal: {np.sum(hyp_space_sizes)}"
         # f"Constant Sampling: 0.0\nTotal: {np.sum(hyp_space_sizes)}"
-        # f"Intelligent Sampling: 0.1 + (-1 * 0.05 * slope)\nTotal: {np.sum(hyp_space_sizes)}"
+        # f"Intelligent Sampling: 0.1 + (-1 * 0.05 * slope)\nTotal: {np.sum(hyp_space_sizes)}"  # noqa: E501
     )
     plt.show()
 
