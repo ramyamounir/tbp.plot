@@ -9,8 +9,8 @@
 
 from __future__ import annotations
 
+import bisect
 import logging
-from bisect import bisect_right
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -41,7 +41,6 @@ from tbp.interactive.data import (
     DataLocator,
     DataLocatorStep,
     DataParser,
-    HierarchyStepMapper,
     PretrainedModelsLoader,
     YCBMeshLoader,
 )
@@ -86,10 +85,133 @@ COLOR_PALETTE = {
 
 MAIN_RENDERER_IX = 0
 SIMULATOR_IX = 1
-HLLM_MODEL_IX = 2
-HLLM_PREDICTION_IX = 3
-LLLM_MODEL_IX = 4
-LLLM_PREDICTION_IX = 5
+MODEL_IX = 2
+
+
+class StepMapper:
+    """Bidirectional mapping between global step indices and (episode, local_step).
+
+    Global steps are defined as the concatenation of all local episode steps:
+
+        episode 0: steps [0, ..., n0 - 1]
+        episode 1: steps [0, ..., n1 - 1]
+        ...
+
+    Global index is:
+        [0, ..., n0 - 1, n0, ..., n0 + n1 - 1, ...]
+    """
+
+    def __init__(self, data_parser: DataParser) -> None:
+        self.data_parser = data_parser
+        self._locators = self._create_locators()
+
+        # number of steps in each episode
+        self._episode_lengths: list[int] = self._compute_episode_lengths()
+
+        # global offset of each episode
+        self._prefix_sums: list[int] = self._compute_prefix_sums()
+
+    def _create_locators(self) -> dict[str, DataLocator]:
+        """Create and return data locators used to access episode steps.
+
+        Returns:
+            A dictionary containing the created locators.
+        """
+        locators = {}
+        locators["step"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="lm", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="time"),
+            ]
+        )
+        return locators
+
+    def _compute_episode_lengths(self) -> list[int]:
+        locator = self._locators["step"]
+
+        episode_lengths: list[int] = []
+
+        for episode in self.data_parser.query(locator):
+            episode_lengths.append(
+                len(self.data_parser.extract(locator, episode=episode))
+            )
+
+        if not episode_lengths:
+            raise RuntimeError("No episodes found while computing episode lengths.")
+
+        return episode_lengths
+
+    def _compute_prefix_sums(self) -> list[int]:
+        prefix_sums = [0]
+        for length in self._episode_lengths:
+            prefix_sums.append(prefix_sums[-1] + length)
+        return prefix_sums
+
+    @property
+    def num_episodes(self) -> int:
+        return len(self._episode_lengths)
+
+    @property
+    def total_num_steps(self) -> int:
+        """Total number of steps across all episodes."""
+        return self._prefix_sums[-1]
+
+    def global_to_local(self, global_step: int) -> tuple[int, int]:
+        """Convert a global step index into (episode, local_step).
+
+        Args:
+            global_step: Global step index in the range
+                `[0, total_num_steps)`.
+
+        Returns:
+            A pair `(episode, local_step)` such that:
+              * `episode` is the zero based episode index.
+              * `local_step` is the zero based step index within that episode.
+
+        Raises:
+            IndexError: If `global_step` is negative or not less than
+                `total_num_steps`.
+        """
+        if global_step < 0 or global_step >= self.total_num_steps:
+            raise IndexError(
+                f"global_step {global_step} is out of range [0, {self.total_num_steps})"
+            )
+
+        episode = bisect.bisect_right(self._prefix_sums, global_step) - 1
+        local_step = global_step - self._prefix_sums[episode]
+        return episode, local_step
+
+    def local_to_global(self, episode: int, step: int) -> int:
+        """Convert an (episode, local_step) pair into a global step index.
+
+        Args:
+            episode: Zero based episode index in the range
+                `[0, num_episodes)`.
+            step: Zero based step index within the given episode. Must be in
+                `[0, number_of_steps_in_episode)`.
+
+        Returns:
+            The corresponding global step index, in the range
+            `[0, total_num_steps)`.
+
+        Raises:
+            IndexError: If `episode` is out of range, or if `step` is out of
+                range for the given episode.
+        """
+        if episode < 0 or episode >= self.num_episodes:
+            raise IndexError(
+                f"episode {episode} is out of range [0, {self.num_episodes})"
+            )
+
+        num_steps_in_episode = self._episode_lengths[episode]
+        if step < 0 or step >= num_steps_in_episode:
+            raise IndexError(
+                f"step {step} is out of range [0, {num_steps_in_episode}) "
+                f"for episode {episode}"
+            )
+
+        return self._prefix_sums[episode] + step
 
 
 class ClickWidgetOps:
@@ -110,10 +232,7 @@ class ClickWidgetOps:
         self.cam_dict = cam_dict
         self.subrenderers = [
             SIMULATOR_IX,
-            HLLM_MODEL_IX,
-            HLLM_PREDICTION_IX,
-            LLLM_MODEL_IX,
-            LLLM_PREDICTION_IX,
+            MODEL_IX,
         ]
 
     def add(self, callback: Callable) -> None:
@@ -168,111 +287,65 @@ class ClickWidgetOps:
 class StepSliderWidgetOps:
     """WidgetOps implementation for a Step slider.
 
-    This class adds a slider widget for navigating through timesteps.
-    It publishes changes as `TopicMessage` items under the "agent_step_number"
-    topic. The slider operates on the union of all LM-processed steps, ensuring
-    users can navigate to any step where at least one LM was active.
+    This class adds a slider widget for the global step. It uses the step mapper
+    to retrieve information about the total number of steps. The published state
+    is the global step index; subscribers use their own step_mapper to decode
+    episode and local step as needed.
 
     Attributes:
         plotter: A `vedo.Plotter` object to add or remove the slider and render.
-        steps_mapper: Mapper to convert between hierarchy levels.
-        _union_indices: Array of agent step indices where at least one LM processed.
-        _agent_to_slider: Reverse mapping from agent step to slider index.
+        data_parser: A parser that extracts or queries information from the
+            JSON log file.
+        step_mapper: A mapper between local and global step indices.
         _add_kwargs: Default keyword arguments passed to `plotter.add_slider`.
     """
 
     def __init__(
         self,
         plotter: Plotter,
-        steps_mapper: HierarchyStepMapper,
+        data_parser: DataParser,
+        step_mapper: StepMapper,
     ) -> None:
         self.plotter = plotter
-        self.steps_mapper = steps_mapper
-        self.updaters: list[WidgetUpdater] = []
-
-        # Initialize union indices from the mapper
-        self._union_indices = self.steps_mapper.get_union_agent_indices()
-        self._agent_to_slider = {
-            int(agent_idx): slider_idx
-            for slider_idx, agent_idx in enumerate(self._union_indices)
-        }
+        self.data_parser = data_parser
 
         self._add_kwargs = {
             "xmin": 0,
-            "xmax": max(0, len(self._union_indices) - 1),
+            "xmax": 10,
             "value": 0,
-            "pos": [(0.15, 0.06), (0.85, 0.06)],
+            "pos": [(0.11, 0.06), (0.89, 0.06)],
             "title": "Step",
             "font": FONT,
-            "show_value": True,
+            "show_value": False,
         }
 
+        self.step_mapper = step_mapper
+
     def add(self, callback: Callable) -> Slider2D:
-        """Create the slider widget and set its range from the data.
-
-        Args:
-            callback: Function called with `(widget, event)` when the slider
-                changes in the UI.
-
-        Returns:
-            The created widget as returned by the plotter.
-        """
-        widget = self.plotter.at(MAIN_RENDERER_IX).add_slider(
-            callback, **self._add_kwargs
-        )
-        self.plotter.at(MAIN_RENDERER_IX).render()
+        kwargs = deepcopy(self._add_kwargs)
+        kwargs.update({"xmax": self.step_mapper.total_num_steps - 1})
+        widget = self.plotter.at(0).add_slider(callback, **kwargs)
+        self.plotter.at(0).render()
         return widget
 
     def remove(self, widget: Slider2D) -> None:
-        """Remove the slider widget and re-render.
-
-        Args:
-            widget: The widget object.
-        """
-        self.plotter.at(MAIN_RENDERER_IX).remove(widget)
-        self.plotter.at(MAIN_RENDERER_IX).render()
+        self.plotter.at(0).remove(widget)
+        self.plotter.at(0).render()
 
     def extract_state(self, widget: Slider2D) -> int:
-        """Read the current slider value.
-
-        Args:
-            widget: The widget object.
-
-        Returns:
-            The current slider value rounded to the nearest integer.
-        """
         return extract_slider_state(widget)
 
     def set_state(self, widget: Slider2D, value: int) -> None:
-        """Set the slider's value.
-
-        Args:
-            widget: Slider widget object.
-            value: Desired step index.
-        """
         set_slider_state(widget, value)
 
     def state_to_messages(self, state: int) -> Iterable[TopicMessage]:
-        """Convert the slider state to pubsub messages.
-
-        The slider state (index into union array) is converted to an agent step
-        before publishing, providing a canonical timeline reference.
-
-        Args:
-            state: Slider index (0 to len(union_indices) - 1).
-
-        Returns:
-            A list with a single `TopicMessage` named `"agent_step_number"`
-            containing the corresponding agent step index.
-        """
-        agent_step = int(self._union_indices[state])
-        return [TopicMessage(name="agent_step_number", value=agent_step)]
+        return [TopicMessage(name="global_step", value=state)]
 
 
 class GtMeshWidgetOps:
     """WidgetOps implementation for rendering the ground-truth target mesh.
 
-    This widget is display-only. It listens for `"episode_number"` updates,
+    This widget is display-only. It listens for `"global_step"` updates,
     loads the target object's YCB mesh, applies the episode-specific rotations,
     scales and positions it, and adds it to the plotter. It does not publish
     any messages.
@@ -281,8 +354,8 @@ class GtMeshWidgetOps:
         plotter: A `vedo.Plotter` used to add and remove actors.
         data_parser: A parser that extracts entries from the JSON log.
         ycb_loader: Loader that returns a textured `vedo.Mesh` for a YCB object.
-        steps_mapper: Mapper to convert step indices between hierarchy levels.
-        updaters: A single `WidgetUpdater` that reacts to `"episode_number"`.
+        step_mapper: Mapper to convert global step indices to (episode, local_step).
+        updaters: A list of `WidgetUpdater`s that react to `"global_step"`.
         _locators: Data accessors keyed by name for the parser.
     """
 
@@ -291,23 +364,26 @@ class GtMeshWidgetOps:
         plotter: Plotter,
         data_parser: DataParser,
         ycb_loader: YCBMeshLoader,
-        steps_mapper: HierarchyStepMapper,
+        step_mapper: StepMapper,
     ):
         self.plotter = plotter
         self.data_parser = data_parser
         self.ycb_loader = ycb_loader
-        self.steps_mapper = steps_mapper
+        self.step_mapper = step_mapper
+
+        # Track current episode to avoid reloading mesh unnecessarily
+        self.current_episode: int | None = None
+
         self.updaters = [
             WidgetUpdater(
                 topics=[
-                    TopicSpec("episode_number", required=True),
+                    TopicSpec("global_step", required=True),
                 ],
                 callback=self.update_mesh,
             ),
             WidgetUpdater(
                 topics=[
-                    TopicSpec("episode_number", required=True),
-                    TopicSpec("agent_step_number", required=True),
+                    TopicSpec("global_step", required=True),
                     EventSpec("KeyPressed", "KeyPressEvent", required=False),
                 ],
                 callback=self.update_agent,
@@ -327,33 +403,15 @@ class GtMeshWidgetOps:
             txt="Ground Truth", pos="top-center", font=FONT
         )
 
-        # SM rgb images
-        self.sm0_image = Image | None
-        self.sm1_image = Image | None
-        self.sm0_label: Text2D = Text2D(txt="Sensor 0", pos=(0.085, 0.92), font=FONT)
-        self.sm1_label: Text2D = Text2D(txt="Sensor 1", pos=(0.185, 0.92), font=FONT)
-
         # Path visibility flags
         self.mesh_transparency: float = 0.0
-        self.show_agent_past: bool = False
-        self.show_agent_future: bool = False
         self.show_patch_past: bool = False
-        self.show_patch_future: bool = False
 
         # Path geometry
-        self.agent_past_spheres: list[Sphere] = []
-        self.agent_past_line: Line | None = None
-        self.agent_future_spheres: list[Sphere] = []
-        self.agent_future_line: Line | None = None
-
         self.patch_past_spheres: list[Sphere] = []
         self.patch_past_line: Line | None = None
-        self.patch_future_spheres: list[Sphere] = []
-        self.patch_future_line: Line | None = None
 
         self.plotter.at(SIMULATOR_IX).add(self.text_label)
-        self.plotter.at(MAIN_RENDERER_IX).add(self.sm0_label)
-        self.plotter.at(MAIN_RENDERER_IX).add(self.sm1_label)
 
     def create_locators(self) -> dict[str, DataLocator]:
         """Create and return data locators used by this widget.
@@ -366,6 +424,14 @@ class GtMeshWidgetOps:
             path=[
                 DataLocatorStep.key(name="episode"),
                 DataLocatorStep.key(name="lm", value="target"),
+            ]
+        )
+
+        locators["steps_mask"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="lm_processed_steps"),
             ]
         )
 
@@ -384,20 +450,10 @@ class GtMeshWidgetOps:
         locators["patch_location"] = DataLocator(
             path=[
                 DataLocatorStep.key(name="episode"),
-                DataLocatorStep.key(name="system"),
-                DataLocatorStep.key(name="telemetry", value="processed_observations"),
+                DataLocatorStep.key(name="system", value="LM_0"),
+                DataLocatorStep.key(name="telemetry", value="locations"),
+                DataLocatorStep.key(name="sm", value="patch_0"),
                 DataLocatorStep.index(name="step"),
-                DataLocatorStep.key(name="telemetry_type", value="location"),
-            ]
-        )
-
-        locators["patch_rgb"] = DataLocator(
-            path=[
-                DataLocatorStep.key(name="episode"),
-                DataLocatorStep.key(name="system"),
-                DataLocatorStep.key(name="telemetry", value="raw_observations"),
-                DataLocatorStep.index(name="step"),
-                DataLocatorStep.key(name="telemetry_type", value="rgba"),
             ]
         )
 
@@ -413,48 +469,12 @@ class GtMeshWidgetOps:
             self.plotter.at(SIMULATOR_IX).remove(widget)
             self.plotter.at(SIMULATOR_IX).render()
 
-    def _clear_agent_paths(self) -> None:
-        for s in self.agent_past_spheres:
-            self.plotter.at(SIMULATOR_IX).remove(s)
-        for s in self.agent_future_spheres:
-            self.plotter.at(SIMULATOR_IX).remove(s)
-
-        self.agent_past_spheres.clear()
-        self.agent_future_spheres.clear()
-
-        if self.agent_past_line is not None:
-            self.plotter.at(SIMULATOR_IX).remove(self.agent_past_line)
-            self.agent_past_line = None
-        if self.agent_future_line is not None:
-            self.plotter.at(SIMULATOR_IX).remove(self.agent_future_line)
-            self.agent_future_line = None
-
-    def _clear_patch_paths(self) -> None:
-        for s in self.patch_past_spheres:
-            self.plotter.at(SIMULATOR_IX).remove(s)
-        for s in self.patch_future_spheres:
-            self.plotter.at(SIMULATOR_IX).remove(s)
-
-        self.patch_past_spheres.clear()
-        self.patch_future_spheres.clear()
-
-        if self.patch_past_line is not None:
-            self.plotter.at(SIMULATOR_IX).remove(self.patch_past_line)
-            self.patch_past_line = None
-        if self.patch_future_line is not None:
-            self.plotter.at(SIMULATOR_IX).remove(self.patch_future_line)
-            self.patch_future_line = None
-
-    def _clear_all_paths(self) -> None:
-        self._clear_agent_paths()
-        self._clear_patch_paths()
-
     def update_mesh(self, widget: Mesh, msgs: list[TopicMessage]) -> tuple[Mesh, bool]:
         """Update the target mesh when the episode changes.
 
         Removes any existing mesh, loads the episode's primary target object,
         applies its Euler rotations, scales and positions it, then adds it to
-        the plotter.
+        the plotter. The mesh is only reloaded if the episode has changed.
 
         Args:
             widget: The currently displayed mesh, if any.
@@ -464,13 +484,19 @@ class GtMeshWidgetOps:
             A tuple `(mesh, False)`. The second value is `False` to indicate
             that no publish should occur.
         """
-        self.remove(widget)
         msgs_dict = {msg.name: msg.value for msg in msgs}
+        global_step = msgs_dict["global_step"]
+        episode_number, _ = self.step_mapper.global_to_local(global_step)
+
+        # Only reload the mesh if the episode has changed
+        if self.current_episode == episode_number:
+            return widget, False
+
+        self.current_episode = episode_number
+        self.remove(widget)
 
         locator = self._locators["target"]
-        target = self.data_parser.extract(
-            locator, episode=str(msgs_dict["episode_number"])
-        )
+        target = self.data_parser.extract(locator, episode=str(episode_number))
         target_id = target["primary_target_object"]
         target_rot = target["primary_target_rotation_quat"]
         target_pos = target["primary_target_position"]
@@ -494,21 +520,24 @@ class GtMeshWidgetOps:
 
     def update_agent(self, widget: None, msgs: list[TopicMessage]) -> tuple[None, bool]:
         msgs_dict = {msg.name: msg.value for msg in msgs}
-        episode_number = msgs_dict["episode_number"]
-        agent_step = msgs_dict["agent_step_number"]
+        global_step = msgs_dict["global_step"]
+        episode_number, step_number = self.step_mapper.global_to_local(global_step)
+
+        steps_mask = self.data_parser.extract(
+            self._locators["steps_mask"], episode=str(episode_number)
+        )
+        mapping = np.flatnonzero(steps_mask)
 
         agent_pos = self.data_parser.extract(
             self._locators["agent_location"],
             episode=str(episode_number),
-            # -1 offset due to size mismatch in motor_system data
-            sm_step=max(0, agent_step - 1),
+            sm_step=max(0, int(mapping[step_number]) - 1),
         )
 
         patch_pos = self.data_parser.extract(
             self._locators["patch_location"],
             episode=str(episode_number),
-            system="SM_0",
-            step=agent_step,
+            step=step_number,
         )
 
         if self.agent_sphere is None:
@@ -528,177 +557,69 @@ class GtMeshWidgetOps:
             self.plotter.at(SIMULATOR_IX).add(self.gaze_line)
         self.gaze_line.points = [agent_pos, patch_pos]
 
-        # Clear Images
-        if self.sm0_image is not None:
-            self.plotter.at(MAIN_RENDERER_IX).remove(self.sm0_image)
-            self.sm0_image = None
-        if self.sm1_image is not None:
-            self.plotter.at(MAIN_RENDERER_IX).remove(self.sm1_image)
-            self.sm1_image = None
-
-        # Check if LM_0 processed this step and show its patch
-        lm0_step = self.steps_mapper.convert(agent_step, "agent", "LM_0")
-        if lm0_step is not None:
-            patch_rgb_lm0 = self.data_parser.extract(
-                self._locators["patch_rgb"],
-                episode=str(episode_number),
-                system="SM_0",
-                step=agent_step,
-            )
-            patch_rgb_lm0 = np.array(patch_rgb_lm0)[:, :, :3]
-            sm0_image = Image(patch_rgb_lm0).scale(0.0005).shift(-0.21, 0.07, 0.0)
-            self.plotter.at(MAIN_RENDERER_IX).add(sm0_image)
-            self.sm0_image = sm0_image
-
-        # Check if LM_1 processed this step and show its patch
-        lm1_step = self.steps_mapper.convert(agent_step, "agent", "LM_1")
-        if lm1_step is not None:
-            patch_rgb_lm1 = self.data_parser.extract(
-                self._locators["patch_rgb"],
-                episode=str(episode_number),
-                system="SM_1",
-                step=agent_step,
-            )
-            patch_rgb_lm1 = np.array(patch_rgb_lm1)[:, :, :3]
-
-            sm1_image = Image(patch_rgb_lm1).scale(0.0005).shift(-0.16, 0.07, 0.0)
-            self.plotter.at(MAIN_RENDERER_IX).add(sm1_image)
-            self.sm1_image = sm1_image
-
-        self._clear_all_paths()
+        # Handle keypress to toggle patch path visibility
+        self._clear_patch_paths()
         key_event = msgs_dict.get("KeyPressEvent", None)
-        if key_event is not None and getattr(key_event, "at", None) == 1:
+        if key_event is not None and getattr(key_event, "at", None) == SIMULATOR_IX:
             key = getattr(key_event, "keypress", None)
-
-            if key == "a":
-                self.show_agent_past = not self.show_agent_past
-            elif key == "A":
-                self.show_agent_future = not self.show_agent_future
-            elif key == "s":
+            if key == "s":
                 self.show_patch_past = not self.show_patch_past
-            elif key == "S":
-                self.show_patch_future = not self.show_patch_future
-            elif key == "d":
-                self.show_agent_past = False
-                self.show_agent_future = False
-                self.show_patch_past = False
-                self.show_patch_future = False
 
-        # expire the event so it only affects this call
+        # Expire the event so it only affects this call
         self.updaters[1].expire_topic("KeyPressEvent")
 
-        # Get the union of all LM-processed steps and find current position
-        union_indices = self.steps_mapper.get_union_agent_indices()
-        curr_idx = int(np.searchsorted(union_indices, agent_step))
+        # Get total steps for this episode
+        num_steps = len(
+            self.data_parser.query(
+                self._locators["patch_location"], episode=str(episode_number)
+            )
+        )
 
-        if self.show_agent_past or self.show_agent_future:
-            self._rebuild_agent_paths(episode_number, curr_idx, union_indices)
-
-        if self.show_patch_past or self.show_patch_future:
-            self._rebuild_patch_paths(episode_number, curr_idx, union_indices)
+        if self.show_patch_past:
+            self._rebuild_patch_paths(episode_number, num_steps, step_number)
 
         return widget, False
 
-    def _rebuild_agent_paths(
-        self,
-        episode_number: int,
-        curr_idx: int,
-        union_indices: np.ndarray,
-    ) -> None:
-        """Rebuild past/future agent paths.
+    def _clear_patch_paths(self) -> None:
+        """Clear all patch path geometry from the plotter."""
+        for s in self.patch_past_spheres:
+            self.plotter.at(SIMULATOR_IX).remove(s)
+        self.patch_past_spheres.clear()
 
-        Args:
-            episode_number: The current episode number.
-            curr_idx: The current index into union_indices.
-            union_indices: Array of agent step indices (union of all LM steps).
-        """
-        # Collect all agent positions for union steps
-        agent_positions: list[np.ndarray] = []
-        for agent_step in union_indices:
-            pos = self.data_parser.extract(
-                self._locators["agent_location"],
-                episode=str(episode_number),
-                # Note: -1 offset due to size mismatch in motor_system data
-                sm_step=max(0, int(agent_step) - 1),
-            )
-            agent_positions.append(pos)
-
-        if self.show_agent_past and agent_positions:
-            past_pts = agent_positions[: curr_idx + 1]
-            for p in past_pts:
-                s = Sphere(pos=p, r=0.002, c=COLOR_PALETTE["Secondary"])
-                self.plotter.at(SIMULATOR_IX).add(s)
-                self.agent_past_spheres.append(s)
-            if len(past_pts) >= 2:
-                self.agent_past_line = Line(
-                    past_pts, c=COLOR_PALETTE["Secondary"], lw=1
-                )
-                self.plotter.at(SIMULATOR_IX).add(self.agent_past_line)
-
-        if (
-            self.show_agent_future
-            and agent_positions
-            and curr_idx < len(agent_positions) - 1
-        ):
-            future_pts = agent_positions[curr_idx + 1 :]
-            for p in future_pts:
-                s = Sphere(pos=p, r=0.002, c=COLOR_PALETTE["Secondary"])
-                self.plotter.at(SIMULATOR_IX).add(s)
-                self.agent_future_spheres.append(s)
-            if len(future_pts) >= 2:
-                self.agent_future_line = Line(
-                    future_pts, c=COLOR_PALETTE["Secondary"], lw=1
-                )
-                self.plotter.at(SIMULATOR_IX).add(self.agent_future_line)
+        if self.patch_past_line is not None:
+            self.plotter.at(SIMULATOR_IX).remove(self.patch_past_line)
+            self.patch_past_line = None
 
     def _rebuild_patch_paths(
         self,
         episode_number: int,
+        num_steps: int,
         curr_idx: int,
-        union_indices: np.ndarray,
     ) -> None:
-        """Rebuild past/future patch (sensor) paths.
+        """Rebuild past patch (sensor) path with black spheres and lines.
 
         Args:
-            episode_number: The current episode number.
-            curr_idx: The current index into union_indices.
-            union_indices: Array of agent step indices (union of all LM steps).
+            episode_number: Current episode number.
+            num_steps: Total number of steps in the episode.
+            curr_idx: Current step index.
         """
         patch_positions: list[np.ndarray] = []
-        for agent_step in union_indices:
+        for k in range(min(curr_idx + 1, num_steps)):
             pos = self.data_parser.extract(
                 self._locators["patch_location"],
                 episode=str(episode_number),
-                system="SM_0",
-                step=int(agent_step),
+                step=k,
             )
-            patch_positions.append(pos)
+            patch_positions.append(np.array(pos))
 
-        if self.show_patch_past and patch_positions:
-            past_pts = patch_positions[: curr_idx + 1]
-            for p in past_pts:
-                s = Sphere(pos=p, r=0.002, c=COLOR_PALETTE["Accent3"])
+        if patch_positions:
+            for p in patch_positions:
+                s = Sphere(pos=p, r=0.002, c="black")
                 self.plotter.at(SIMULATOR_IX).add(s)
                 self.patch_past_spheres.append(s)
-            if len(past_pts) >= 2:
-                self.patch_past_line = Line(past_pts, c=COLOR_PALETTE["Accent3"], lw=1)
+            if len(patch_positions) >= 2:
+                self.patch_past_line = Line(patch_positions, c="black", lw=1)
                 self.plotter.at(SIMULATOR_IX).add(self.patch_past_line)
-
-        if (
-            self.show_patch_future
-            and patch_positions
-            and curr_idx < len(patch_positions) - 1
-        ):
-            future_pts = patch_positions[curr_idx + 1 :]
-            for p in future_pts:
-                s = Sphere(pos=p, r=0.002, c=COLOR_PALETTE["Accent2"])
-                self.plotter.at(SIMULATOR_IX).add(s)
-                self.patch_future_spheres.append(s)
-            if len(future_pts) >= 2:
-                self.patch_future_line = Line(
-                    future_pts, c=COLOR_PALETTE["Accent2"], lw=1
-                )
-                self.plotter.at(SIMULATOR_IX).add(self.patch_future_line)
 
     def update_transparency(
         self, widget: None, msgs: list[TopicMessage]
@@ -755,14 +676,12 @@ class ModelViewerWidgetOps:
         plotter: Plotter,
         data_parser: DataParser,
         models_loader: PretrainedModelsLoader,
-        steps_mapper: HierarchyStepMapper,
     ):
         self.plotter = plotter
         self.data_parser = data_parser
         self.models_loader = models_loader
         self.renderer_id = renderer_id
         self.lm_id = lm_id
-        self.steps_mapper = steps_mapper
 
         # Mode tracking: "mlh" shows current_mlh, "manual" shows manually selected
         self.mode: str = "mlh"
@@ -794,15 +713,6 @@ class ModelViewerWidgetOps:
         self.updaters = [
             WidgetUpdater(
                 topics=[
-                    TopicSpec("episode_number", required=True),
-                    TopicSpec("agent_step_number", required=True),
-                ],
-                callback=self.update_model,
-            ),
-            WidgetUpdater(
-                topics=[
-                    TopicSpec("episode_number", required=True),
-                    TopicSpec("agent_step_number", required=True),
                     EventSpec("KeyPressed", "KeyPressEvent", required=True),
                 ],
                 callback=self.handle_keypress,
@@ -823,6 +733,11 @@ class ModelViewerWidgetOps:
             txt=self._channel, pos="bottom-right", font=FONT, s=0.5
         )
         self.plotter.at(self.renderer_id).add(self.channel_label)
+
+    def add(self, callback: Callable) -> None:
+        widget = self._create_pointcloud()
+        self.plotter.at(self.renderer_id).add(widget)
+        return widget
 
     def _create_locators(self) -> dict[str, DataLocator]:
         """Create and return data locators used by this widget.
@@ -911,60 +826,27 @@ class ModelViewerWidgetOps:
         # clone2d creates a screen-space Actor2D with pos in [0,1] range
         return image.clone2d(pos=(0.0, 0.0), size=0.7)
 
-    def _create_pointcloud(
-        self, episode_number: int, mapped_step_number: int
-    ) -> Points | None:
-        """Display a pointcloud based on current mode and step.
-
-        Gets target rotation, determines which object to display based on mode,
-        creates and adds the pointcloud, and updates labels.
-
-        Args:
-            episode_number: The episode number.
-            mapped_step_number: The step number in the LM hierarchy.
+    def _create_pointcloud(self) -> Points | None:
+        """Display a pointcloud models.
 
         Returns:
             The created Points widget.
         """
-        # Get target rotation
-        target = self.data_parser.extract(
-            self._locators["target"], episode=str(episode_number)
-        )
-        target_rot = target["primary_target_rotation_quat"]
-
         # Determine which object to show
-        if self.mode == "mlh":
-            # Get current_mlh for this step
-            mlh_data = self.data_parser.extract(
-                self._locators["mlh"],
-                episode=str(episode_number),
-                step=mapped_step_number,
-            )
-            # current_mlh should contain the graph_id
-            graph_id = mlh_data["graph_id"]
-        else:
-            # Manual mode - use selected object
-            graph_id = self.available_objects[self.manual_object_index]
+        graph_id = self.available_objects[self.manual_object_index]
+        channel = self.available_channels[self.channel_index]
 
         # Create and add the pointcloud
         points = self.models_loader.create_model(
             graph_id=graph_id,
             lm_id=self.lm_id,
-            input_channel=self._channel,
+            input_channel=channel,
             color=True,
         )
         # Extract legend_data before cloning (clone doesn't copy custom attributes)
         legend_data = getattr(points, "legend_data", None)
         widget = points.clone(deep=True)
 
-        # Apply target rotation
-        rot = Rotation.from_quat(np.array(target_rot), scalar_first=True)
-        rot_euler = rot.as_euler("xyz", degrees=True)
-        widget.rotate_x(rot_euler[0])
-        widget.rotate_y(rot_euler[1])
-        widget.rotate_z(rot_euler[2])
-
-        self.plotter.at(self.renderer_id).add(widget)
         self.current_pointcloud = widget
         self.graph_id_label.text(graph_id)
         self.channel_label.text(self._channel)
@@ -997,14 +879,9 @@ class ModelViewerWidgetOps:
         msgs_dict = {msg.name: msg.value for msg in msgs}
 
         episode_number = msgs_dict["episode_number"]
-        agent_step = msgs_dict["agent_step_number"]
-        mapped_step_number = self.steps_mapper.convert(
-            agent_step, from_level="agent", to_level=self._lm_key
-        )
-        if mapped_step_number is None:
-            return widget, False
+        step_number = msgs_dict["step_number"]
 
-        widget = self._create_pointcloud(episode_number, mapped_step_number)
+        widget = self._create_pointcloud(episode_number, step_number)
         return widget, False
 
     def handle_keypress(
@@ -1024,16 +901,9 @@ class ModelViewerWidgetOps:
             A tuple (pointcloud, False). False indicates no publish.
         """
         # Expire the event from the WidgetUpdater inbox
-        self.updaters[1].expire_topic("KeyPressEvent")
+        self.updaters[0].expire_topic("KeyPressEvent")
 
         msgs_dict = {msg.name: msg.value for msg in msgs}
-        episode_number = msgs_dict["episode_number"]
-        agent_step = msgs_dict["agent_step_number"]
-        mapped_step_number = self.steps_mapper.convert(
-            agent_step, from_level="agent", to_level=self._lm_key
-        )
-        if mapped_step_number is None:
-            return widget, False
 
         key_event = msgs_dict.get("KeyPressEvent", None)
         if key_event is None:
@@ -1045,28 +915,23 @@ class ModelViewerWidgetOps:
 
         key = key_event["keypress"]
         if key == "m":
-            self.mode = "manual"
             self.manual_object_index = (self.manual_object_index - 1) % len(
                 self.available_objects
             )
         elif key == "M":
-            self.mode = "manual"
             self.manual_object_index = (self.manual_object_index + 1) % len(
                 self.available_objects
             )
         elif key == "c":
             self.channel_index = (self.channel_index - 1) % len(self.available_channels)
-            self._channel = self.available_channels[self.channel_index]
         elif key == "C":
             self.channel_index = (self.channel_index + 1) % len(self.available_channels)
-            self._channel = self.available_channels[self.channel_index]
-        elif key == "period":
-            self.mode = "mlh"
 
         self._clear_pointcloud()
         self._clear_labels()
 
-        widget = self._create_pointcloud(episode_number, mapped_step_number)
+        widget = self._create_pointcloud()
+        self.plotter.at(self.renderer_id).add(widget)
         return widget, False
 
     def remove(self, widget: Points | None) -> None:
@@ -1084,15 +949,16 @@ class EvidenceViewerWidgetOps:
     """WidgetOps implementation for displaying evidence scores over time as a lineplot.
 
     This widget shows a seaborn lineplot of maximum evidence scores for each object
-    over time for a specific Learning Module (LM). It displays a vertical black line
-    to mark the current step position.
+    across all episodes (global timeline) for a specific Learning Module (LM). Episodes
+    are concatenated back-to-back to form a single continuous plot. A vertical black
+    line marks the current global step position.
 
     Attributes:
         plotter: A `vedo.Plotter` used to add and remove actors.
         data_parser: A parser that extracts entries from the JSON log.
         renderer_id: The renderer index where this widget displays.
         lm_id: The learning module ID (0 for L-LLM, 1 for H-LLM).
-        steps_mapper: Mapper class to convert between steps in different timescales.
+        step_mapper: Mapper class to convert between local and global step indices.
         current_image: The currently displayed vedo Image, if any.
     """
 
@@ -1116,7 +982,7 @@ class EvidenceViewerWidgetOps:
         lm_id: int,
         plotter: Plotter,
         data_parser: DataParser,
-        steps_mapper: HierarchyStepMapper,
+        step_mapper: StepMapper,
         scale: float = 0.003,
         pos: tuple[float, float, float] = (0.0, 0.0, 0.0),
     ):
@@ -1124,7 +990,7 @@ class EvidenceViewerWidgetOps:
         self.data_parser = data_parser
         self.renderer_id = renderer_id
         self.lm_id = lm_id
-        self.steps_mapper = steps_mapper
+        self.step_mapper = step_mapper
         self.scale = scale
         self.pos = pos
 
@@ -1134,18 +1000,18 @@ class EvidenceViewerWidgetOps:
         # Current image actor
         self.current_image: Image | None = None
 
-        # Cache for evidence data per episode
-        self._cached_episode: int | None = None
+        # Cache for evidence data across all episodes (global timeline)
+        self._data_loaded: bool = False
         self._cached_max_evidence: dict[str, list[float]] = {}
         self._cached_objects: list[str] = []
+        self._cached_bursts: list[bool] = []
 
         self._locators = self._create_locators()
 
         self.updaters = [
             WidgetUpdater(
                 topics=[
-                    TopicSpec("episode_number", required=True),
-                    TopicSpec("agent_step_number", required=True),
+                    TopicSpec("global_step", required=True),
                 ],
                 callback=self.update_plot,
             ),
@@ -1168,60 +1034,108 @@ class EvidenceViewerWidgetOps:
             ]
         )
 
-        # Locator for querying all steps to build the full evidence timeline
-        locators["evidences_all"] = DataLocator(
+        # Locator for querying evidence via hypotheses_updater_telemetry
+        locators["hyp_space"] = DataLocator(
             path=[
                 DataLocatorStep.key(name="episode"),
                 DataLocatorStep.key(name="lm", value=self._lm_key),
-                DataLocatorStep.key(name="telemetry", value="evidences"),
+                DataLocatorStep.key(
+                    name="telemetry", value="hypotheses_updater_telemetry"
+                ),
+                DataLocatorStep.index(name="step"),
+                DataLocatorStep.key(name="obj"),
+                DataLocatorStep.key(name="channel", value="patch_0"),
+                DataLocatorStep.key(name="telemetry", value="evidence"),
+            ]
+        )
+
+        # Locator for querying added_ids (burst detection)
+        locators["added_ids"] = DataLocator(
+            path=[
+                DataLocatorStep.key(name="episode"),
+                DataLocatorStep.key(name="lm", value=self._lm_key),
+                DataLocatorStep.key(
+                    name="telemetry", value="hypotheses_updater_telemetry"
+                ),
+                DataLocatorStep.index(name="step"),
+                DataLocatorStep.key(name="obj"),
+                DataLocatorStep.key(name="channel", value="patch_0"),
+                DataLocatorStep.key(name="telemetry2", value="hypotheses_updater"),
+                DataLocatorStep.key(name="telemetry3", value="added_ids"),
             ]
         )
 
         return locators
 
-    def _load_evidence_data(self, episode_number: int) -> None:
-        """Load and cache evidence data for the given episode.
+    def _load_all_evidence_data(self) -> None:
+        """Load and cache evidence data for all episodes.
 
-        Extracts the evidences telemetry and computes the maximum evidence
-        for each object at each step.
-
-        Args:
-            episode_number: The episode number to load data for.
+        Extracts evidence from hypotheses_updater_telemetry for all episodes and
+        computes the maximum evidence for each object at each global step. Episodes
+        are concatenated back-to-back to form a global timeline. Also loads burst
+        data (steps where new hypotheses were added).
         """
-        if self._cached_episode == episode_number:
+        if self._data_loaded:
             return
 
-        # Query all evidence steps for this LM
-        all_evidence_steps = self.data_parser.extract(
-            self._locators["evidences_all"],
-            episode=str(episode_number),
-        )
+        # Initialize storage
+        self._cached_max_evidence = {}
+        self._cached_objects = []
+        self._cached_bursts = []
 
-        if not all_evidence_steps:
-            self._cached_max_evidence = {}
-            self._cached_objects = []
-            self._cached_episode = episode_number
-            return
+        # Iterate over all episodes
+        for episode in range(self.step_mapper.num_episodes):
+            # Query available steps for this episode
+            steps = self.data_parser.query(
+                self._locators["hyp_space"], episode=str(episode)
+            )
 
-        # Get object names (graph_ids) from first step
-        self._cached_objects = list(all_evidence_steps[0].keys())
+            if not steps:
+                continue
 
-        # Build max evidence timeline for each object
-        self._cached_max_evidence = {obj: [] for obj in self._cached_objects}
-        for step_data in all_evidence_steps:
-            for obj in self._cached_objects:
-                evidence_list = step_data.get(obj, [])
-                # Get maximum evidence for this object at this step
-                max_evidence = max(evidence_list) if evidence_list else 0.0
-                self._cached_max_evidence[obj].append(max_evidence)
+            # Get object names from first step of first episode
+            if not self._cached_objects:
+                objects_list = self.data_parser.query(
+                    self._locators["hyp_space"], episode=str(episode), step=0
+                )
+                # Sort objects to ensure consistent ordering with ModelViewer legend
+                self._cached_objects = sorted(objects_list)
+                self._cached_max_evidence = {obj: [] for obj in self._cached_objects}
 
-        self._cached_episode = episode_number
+            # Append evidence data for this episode to the global timeline
+            for step in steps:
+                step_had_burst = False
+                for obj in self._cached_objects:
+                    evidence_list = self.data_parser.extract(
+                        self._locators["hyp_space"],
+                        episode=str(episode),
+                        step=step,
+                        obj=obj,
+                    )
+                    # Get maximum evidence for this object at this step
+                    max_evidence = max(evidence_list) if evidence_list else 0.0
+                    self._cached_max_evidence[obj].append(max_evidence)
 
-    def _create_lineplot_image(self, current_step: int) -> Image | None:
+                    # Check if this object had a burst at this step
+                    added_ids = self.data_parser.extract(
+                        self._locators["added_ids"],
+                        episode=str(episode),
+                        step=step,
+                        obj=obj,
+                    )
+                    if added_ids and len(added_ids) > 0:
+                        step_had_burst = True
+
+                self._cached_bursts.append(step_had_burst)
+
+        self._data_loaded = True
+
+    def _create_lineplot_image(self, global_step: int) -> Image | None:
         """Create a seaborn lineplot as a vedo Image.
 
         Args:
-            current_step: The current step in the LM's timeline (0-indexed).
+            global_step: The current global step index (0-indexed, across all
+                episodes).
 
         Returns:
             A vedo Image containing the rendered lineplot, or None if no data.
@@ -1230,7 +1144,7 @@ class EvidenceViewerWidgetOps:
             return None
 
         # Create figure with matplotlib/seaborn
-        fig, ax = plt.subplots(figsize=(4, 3), dpi=100)
+        fig, ax = plt.subplots(1, 1, figsize=(14, 3), dpi=200)
 
         # Plot each object's evidence as a line
         for i, obj in enumerate(self._cached_objects):
@@ -1244,15 +1158,32 @@ class EvidenceViewerWidgetOps:
                 label=obj,
             )
 
-        # Draw vertical line at current step
-        ax.axvline(x=current_step, color="black", linewidth=2, linestyle="-")
+        # Burst locations (faint red lines for steps with added hypotheses)
+        bursts = np.array(self._cached_bursts)
+        add_idx = np.flatnonzero(bursts)
+        if add_idx.size > 0:
+            ymin, ymax = ax.get_ylim()
+            ax.vlines(
+                add_idx,
+                ymin,
+                ymax,
+                colors="#FF0000",
+                linestyles="-",
+                alpha=0.3,
+                linewidth=1.0,
+                zorder=1,
+                label="Burst",
+            )
+
+        # Draw vertical line at current global step
+        ax.axvline(x=global_step, color="black", linewidth=2, linestyle="-")
 
         # Set title based on LM
         title_text = "H-LLM Evidence" if self.lm_id == 1 else "L-LLM Evidence"
         ax.set_title(title_text, fontsize=12)
 
         # Style the plot
-        ax.set_xlabel("Step", fontsize=10)
+        ax.set_xlabel("Global Step", fontsize=10)
         ax.set_ylabel("Evidence", fontsize=10)
         ax.set_xlim(
             0, max(1, len(self._cached_max_evidence[self._cached_objects[0]]) - 1)
@@ -1280,7 +1211,7 @@ class EvidenceViewerWidgetOps:
         image = Image(fig)
         plt.close(fig)
 
-        return image
+        return image.clone2d(pos=(0.08, 0.1), size=0.5)
 
     def _clear_image(self) -> None:
         """Remove the current image from the plotter."""
@@ -1291,7 +1222,7 @@ class EvidenceViewerWidgetOps:
     def update_plot(
         self, widget: Image | None, msgs: list[TopicMessage]
     ) -> tuple[Image | None, bool]:
-        """Update the evidence plot based on current episode and step.
+        """Update the evidence plot based on current global step.
 
         Args:
             widget: The currently displayed image, if any.
@@ -1303,27 +1234,15 @@ class EvidenceViewerWidgetOps:
         self._clear_image()
         msgs_dict = {msg.name: msg.value for msg in msgs}
 
-        episode_number = msgs_dict["episode_number"]
-        agent_step = msgs_dict["agent_step_number"]
+        global_step = msgs_dict["global_step"]
 
-        # Convert from agent step to this LM's step
-        mapped_step_number = self.steps_mapper.convert(
-            agent_step, from_level="agent", to_level=self._lm_key
-        )
+        # Load evidence data for all episodes (cached)
+        self._load_all_evidence_data()
 
-        # If this step doesn't exist for this LM, don't display anything
-        if mapped_step_number is None:
-            return widget, False
-
-        # Load evidence data for this episode (cached)
-        self._load_evidence_data(episode_number)
-
-        # Create the lineplot image
-        image = self._create_lineplot_image(mapped_step_number)
+        # Create the lineplot image with global step
+        image = self._create_lineplot_image(global_step)
 
         if image is not None:
-            # Scale and position the image to fit the renderer
-            image.scale(self.scale).pos(*self.pos)
             self.plotter.at(self.renderer_id).add(image)
             self.current_image = image
 
@@ -1373,11 +1292,8 @@ class InteractiveCompositionalPlot:
     ):
         renderer_areas = [
             {"bottomleft": (0.0, 0.0), "topright": (1.0, 1.0)},  # Main renderer
-            {"bottomleft": (0.02, 0.3), "topright": (0.28, 0.7)},  # Simulator Overlay
-            {"bottomleft": (0.3, 0.52), "topright": (0.48, 0.8)},  # H-LLM Model
-            {"bottomleft": (0.52, 0.52), "topright": (0.7, 0.8)},  # H-LLM Prediction
-            {"bottomleft": (0.3, 0.2), "topright": (0.48, 0.48)},  # L-LLM Model
-            {"bottomleft": (0.52, 0.2), "topright": (0.7, 0.48)},  # L-LLM Prediction
+            {"bottomleft": (0.05, 0.5), "topright": (0.49, 0.9)},  # Simulator Overlay
+            {"bottomleft": (0.51, 0.5), "topright": (0.95, 0.9)},  # Pretrained Model
         ]
 
         self.axes_dict = {
@@ -1397,7 +1313,7 @@ class InteractiveCompositionalPlot:
             data_path, mesh_subpath="textured.glb", rotate_obj=False
         )
         self.models_loader = PretrainedModelsLoader(models_path)
-        self.steps_mapper = HierarchyStepMapper(self.data_parser, episode="0")
+        self.step_mapper = StepMapper(self.data_parser)
         self.animator = None
 
         # Initialize event bus and plotter
@@ -1416,9 +1332,6 @@ class InteractiveCompositionalPlot:
             w.add()
 
         # Initialize widget states
-        self.event_bus.sendMessage(
-            "episode_number", msg=TopicMessage("episode_number", 0)
-        )
         self._widgets["step_slider"].set_state(0)
 
         # Setup scope viewer for visibility management
@@ -1449,7 +1362,8 @@ class InteractiveCompositionalPlot:
         widgets["step_slider"] = Widget[Slider2D, int](
             widget_ops=StepSliderWidgetOps(
                 plotter=self.plotter,
-                steps_mapper=self.steps_mapper,
+                data_parser=self.data_parser,
+                step_mapper=self.step_mapper,
             ),
             scopes=[],
             bus=self.event_bus,
@@ -1463,7 +1377,7 @@ class InteractiveCompositionalPlot:
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 ycb_loader=self.ycb_loader,
-                steps_mapper=self.steps_mapper,
+                step_mapper=self.step_mapper,
             ),
             scopes=[],
             bus=self.event_bus,
@@ -1472,30 +1386,13 @@ class InteractiveCompositionalPlot:
             dedupe=True,
         )
 
-        widgets["lllm_model_viewer"] = Widget[Points, None](
+        widgets["model_viewer"] = Widget[Points, None](
             widget_ops=ModelViewerWidgetOps(
-                renderer_id=LLLM_MODEL_IX,
-                lm_id=0,
-                plotter=self.plotter,
-                data_parser=self.data_parser,
-                models_loader=self.models_loader,
-                steps_mapper=self.steps_mapper,
-            ),
-            scopes=[],
-            bus=self.event_bus,
-            scheduler=self.scheduler,
-            debounce_sec=0.5,
-            dedupe=True,
-        )
-
-        widgets["hllm_model_viewer"] = Widget[Points, None](
-            widget_ops=ModelViewerWidgetOps(
-                renderer_id=HLLM_MODEL_IX,
+                renderer_id=MODEL_IX,
                 lm_id=1,
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 models_loader=self.models_loader,
-                steps_mapper=self.steps_mapper,
             ),
             scopes=[],
             bus=self.event_bus,
@@ -1504,32 +1401,15 @@ class InteractiveCompositionalPlot:
             dedupe=True,
         )
 
-        widgets["lllm_evidence_viewer"] = Widget[Image, None](
+        widgets["evidence_viewer"] = Widget[Image, None](
             widget_ops=EvidenceViewerWidgetOps(
                 renderer_id=MAIN_RENDERER_IX,
                 lm_id=0,
                 plotter=self.plotter,
                 data_parser=self.data_parser,
-                steps_mapper=self.steps_mapper,
-                scale=0.0003,
-                pos=(0.11, -0.09, 0.0),
-            ),
-            scopes=[],
-            bus=self.event_bus,
-            scheduler=self.scheduler,
-            debounce_sec=0.5,
-            dedupe=True,
-        )
-
-        widgets["hllm_evidence_viewer"] = Widget[Image, None](
-            widget_ops=EvidenceViewerWidgetOps(
-                renderer_id=MAIN_RENDERER_IX,
-                lm_id=1,
-                plotter=self.plotter,
-                data_parser=self.data_parser,
-                steps_mapper=self.steps_mapper,
-                scale=0.0003,
-                pos=(0.11, 0.0, 0.0),
+                step_mapper=self.step_mapper,
+                scale=0.5,
+                pos=(-400, -150, 0),
             ),
             scopes=[],
             bus=self.event_bus,
@@ -1544,10 +1424,7 @@ class InteractiveCompositionalPlot:
         """Configure and show all renderers."""
         for renderer_ix in [
             SIMULATOR_IX,
-            HLLM_MODEL_IX,
-            HLLM_PREDICTION_IX,
-            LLLM_MODEL_IX,
-            LLLM_PREDICTION_IX,
+            MODEL_IX,
         ]:
             self.plotter.at(renderer_ix).show(
                 axes=deepcopy(self.axes_dict),
@@ -1566,20 +1443,12 @@ class InteractiveCompositionalPlot:
             resetcam=False,
         )
 
-    def create_union_step_animator(self) -> WidgetAnimator:
-        """Create an animator that steps through all union steps (a).
-
-        Returns:
-            A WidgetAnimator configured to step through all union steps.
-        """
+    def create_step_animator(self):
         step_slider = self._widgets["step_slider"]
         slider_current_value = step_slider.widget_ops.extract_state(
             widget=step_slider.widget
         )
         slider_max_value = int(step_slider.widget.range[1])
-
-        if slider_current_value == slider_max_value:
-            slider_current_value = int(step_slider.widget.range[0])
 
         step_actions = make_slider_step_actions_for_widget(
             widget=step_slider,
@@ -1592,55 +1461,7 @@ class InteractiveCompositionalPlot:
         return WidgetAnimator(
             scheduler=self.scheduler,
             actions=step_actions,
-            key_prefix="union_step_animator",
-        )
-
-    def create_lm_step_animator(self, lm_key: str) -> WidgetAnimator:
-        """Create an animator that steps through only the specified LM's steps.
-
-        Args:
-            lm_key: The LM key (e.g., "LM_0" or "LM_1").
-
-        Returns:
-            A WidgetAnimator configured to step through the specified LM's steps.
-        """
-        step_slider = self._widgets["step_slider"]
-        slider_current_value = step_slider.widget_ops.extract_state(
-            widget=step_slider.widget
-        )
-
-        # Get the agent_to_slider mapping from the widget ops
-        agent_to_slider = step_slider.widget_ops._agent_to_slider
-
-        # Get all agent steps for this LM and convert to slider indices
-        slider_values = []
-        lm_agent_indices = self.steps_mapper.get_agent_indices(lm_key)
-        for agent_step in lm_agent_indices:
-            slider_idx = agent_to_slider.get(int(agent_step))
-            if slider_idx is not None:
-                slider_values.append(slider_idx)
-
-        # Find the starting index using bisect_right (next step after current value)
-        values_to_animate = []
-        if slider_values:
-            idx = bisect_right(slider_values, slider_current_value)
-
-            # If at or past the last step, reset to animate from the beginning
-            if idx >= len(slider_values):
-                idx = 0
-
-            values_to_animate = slider_values[idx:]
-
-        step_actions = make_slider_step_actions_for_widget(
-            widget=step_slider,
-            values=values_to_animate,
-            step_dt=0.5,
-        )
-
-        return WidgetAnimator(
-            scheduler=self.scheduler,
-            actions=step_actions,
-            key_prefix=f"{lm_key.lower()}_step_animator",
+            key_prefix="step_animator",
         )
 
     def _on_keypress(self, event):
@@ -1660,19 +1481,7 @@ class InteractiveCompositionalPlot:
             if key == "a":
                 if self.animator is not None:
                     self.animator.stop()
-                self.animator = self.create_union_step_animator()
-                self.animator.start()
-
-            elif key == "l":
-                if self.animator is not None:
-                    self.animator.stop()
-                self.animator = self.create_lm_step_animator("LM_0")
-                self.animator.start()
-
-            elif key == "L":
-                if self.animator is not None:
-                    self.animator.stop()
-                self.animator = self.create_lm_step_animator("LM_1")
+                self.animator = self.create_step_animator()
                 self.animator.start()
 
             elif key == "s":
@@ -1681,8 +1490,8 @@ class InteractiveCompositionalPlot:
 
 
 @register(
-    "interactive_compositional_plot",
-    description="Interactive compositional visualization with 5 renderers",
+    "interactive_pretraining_compositional_plot",
+    description="Interactive compositional visualization with 2 renderers",
 )
 def main(
     experiment_log_dir: str, objects_mesh_dir: str, pretrained_models_file: str
@@ -1715,7 +1524,7 @@ def main(
     return 0
 
 
-@attach_args("interactive_compositional_plot")
+@attach_args("interactive_pretraining_compositional_plot")
 def add_arguments(p: argparse.ArgumentParser) -> None:
     """Add command-line arguments for the interactive compositional plot.
 
@@ -1736,7 +1545,7 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
 
     p.add_argument(
         "--pretrained_models_file",
-        default="~/tbp/results/monty/pretrained_models/my_trained_models/supervised_pre_training_objects_with_logos_lvl1_comp_models_resampling/pretrained/model.pt",
-        # default="/home/ramy/tbp/results/monty/pretrained_models/pretrained_ycb_v11/supervised_pre_training_objects_with_logos_lvl1_comp_models/pretrained/model.pt",
+        # default="~/tbp/results/monty/pretrained_models/my_trained_models/supervised_pre_training_objects_with_logos_lvl1_comp_models_resampling/pretrained/model.pt",
+        default="~/tbp/results/monty/projects/evidence_eval_runs/logs/supervised_pre_training_objects_with_logos_lvl1_comp_models_burst_sampling/pretrained/model.pt",
         help=("The file containing the pretrained models."),
     )
