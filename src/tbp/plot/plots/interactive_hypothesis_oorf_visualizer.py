@@ -39,6 +39,7 @@ from vedo import (
     settings,
 )
 
+from tbp.interactive.utils import normalize_plotter_dpi
 from tbp.plot.plots.interactive_hypothesis_oorf_visualizer_utils.geometry import (
     get_custom_distances,
     rotate_pose_dependent_features,
@@ -274,6 +275,7 @@ class HypothesesOORFVisualizer:
             sharecam=False,
             title=f"Hypotheses Out of Reference Frame",
         )
+        normalize_plotter_dpi(self.plotter)
         # Add static elements to main renderer
         self._add_object_pointcloud()
         self._add_legend()

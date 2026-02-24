@@ -28,6 +28,7 @@ from vedo import (
     settings,
 )
 
+from tbp.interactive.utils import normalize_plotter_dpi
 from tbp.plot.plots.stats import deserialize_json_chunks
 from tbp.plot.registry import attach_args, register
 
@@ -612,6 +613,7 @@ class InteractivePlot:
 
         # Create a plotter with 3 renderers (2 on top, 1 on bottom)
         self.plotter = Plotter(shape="2/1", size=(1000, 1000), sharecam=False)
+        normalize_plotter_dpi(self.plotter)
 
         # Create a slider on the plot
         self.slider = self.plotter.at(0).add_slider(

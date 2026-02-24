@@ -23,6 +23,35 @@ from vedo.vtkclasses import vtkRenderWindowInteractor
 if TYPE_CHECKING:
     from collections.abc import Callable, Hashable, Iterable
 
+    from vedo import Plotter
+
+
+def normalize_plotter_dpi(plotter: Plotter) -> None:
+    """Disable HiDPI backing so the plotter renders at standard resolution.
+
+    On macOS Retina displays, VTK's Cocoa render window uses a 2x backing
+    framebuffer (``wantsBestResolutionOpenGLSurface``).  This causes
+    text-based widgets (Button, Text2D) and screen-pixel sizes (point_size,
+    Points r) to appear at half their intended physical size, while slider
+    geometry self-corrects via ``GetSize()``.  No single DPI value fixes both.
+
+    Disabling the high-resolution backing makes the render window use logical
+    pixel coordinates, matching a standard 72 DPI display.
+
+    Must be called after creating the ``Plotter`` and **before** any
+    ``.render()`` or ``.show()`` call so that the setting takes effect
+    before the native window is realized.
+
+    On Linux / X11 this is a no-op because ``vtkXOpenGLRenderWindow`` does
+    not expose ``SetWantsBestResolution``.
+
+    Args:
+        plotter: A vedo Plotter whose render window will be configured.
+    """
+    window = plotter.window
+    if hasattr(window, "SetWantsBestResolution"):
+        window.SetWantsBestResolution(False)
+
 
 @dataclass
 class Location2D:

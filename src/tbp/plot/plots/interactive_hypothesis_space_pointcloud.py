@@ -38,6 +38,7 @@ from tbp.interactive.data import (
 from tbp.interactive.topics import TopicMessage, TopicSpec
 from tbp.interactive.utils import (
     Location3D,
+    normalize_plotter_dpi,
 )
 from tbp.interactive.widget_updaters import WidgetUpdater
 from tbp.interactive.widgets import (
@@ -1421,7 +1422,9 @@ class InteractivePlot:
         self.ycb_loader = YCBMeshLoader(data_path)
         self.models_loader = PretrainedModelsLoader(models_path)
         self.event_bus = Publisher()
-        self.plotter = Plotter(shape=renderer_areas, sharecam=False).render()
+        self.plotter = Plotter(shape=renderer_areas, sharecam=False)
+        normalize_plotter_dpi(self.plotter)
+        self.plotter.render()
         self.scheduler = VtkDebounceScheduler(self.plotter.interactor, period_ms=33)
         self.animator = None
 

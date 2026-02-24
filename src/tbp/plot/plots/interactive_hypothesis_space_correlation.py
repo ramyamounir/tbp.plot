@@ -54,6 +54,7 @@ from tbp.interactive.utils import (
     CoordinateMapper,
     Location2D,
     Location3D,
+    normalize_plotter_dpi,
     rotate_about_pivot,
     trace_hypothesis_backward,
     trace_hypothesis_forward,
@@ -3007,7 +3008,9 @@ class InteractivePlot:
         self.data_parser = DataParser(exp_path)
         self.ycb_loader = YCBMeshLoader(data_path)
         self.event_bus = Publisher()
-        self.plotter = Plotter(shape=renderer_areas, sharecam=False).render()
+        self.plotter = Plotter(shape=renderer_areas, sharecam=False)
+        normalize_plotter_dpi(self.plotter)
+        self.plotter.render()
         self.scheduler = VtkDebounceScheduler(self.plotter.interactor, period_ms=33)
         self.animator = None
 
