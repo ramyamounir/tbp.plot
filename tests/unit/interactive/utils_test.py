@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 
@@ -18,9 +19,87 @@ from tbp.interactive.utils import (
     CoordinateMapper,
     Location2D,
     Location3D,
+    _get_scale_macos,
+    get_display_scale,
     trace_hypothesis_backward,
     trace_hypothesis_forward,
 )
+
+
+class GetDisplayScaleTests(unittest.TestCase):
+    @patch("tbp.interactive.utils.platform")
+    @patch("tbp.interactive.utils._get_scale_macos", return_value=2.0)
+    def test_returns_scale_on_darwin(
+        self, mock_macos: MagicMock, mock_platform: MagicMock
+    ) -> None:
+        """On macOS, delegates to _get_scale_macos."""
+        mock_platform.system.return_value = "Darwin"
+        mock_plotter = MagicMock()
+        result = get_display_scale(mock_plotter)
+        self.assertEqual(result, 2.0)
+        mock_macos.assert_called_once()
+
+    @patch("tbp.interactive.utils.platform")
+    def test_returns_one_on_linux(self, mock_platform: MagicMock) -> None:
+        """On Linux, return 1.0."""
+        mock_platform.system.return_value = "Linux"
+        mock_plotter = MagicMock()
+        result = get_display_scale(mock_plotter)
+        self.assertEqual(result, 1.0)
+
+    @patch("tbp.interactive.utils.platform")
+    def test_returns_one_on_unknown_platform(self, mock_platform: MagicMock) -> None:
+        """On unknown platforms, return 1.0."""
+        mock_platform.system.return_value = "FreeBSD"
+        mock_plotter = MagicMock()
+        result = get_display_scale(mock_plotter)
+        self.assertEqual(result, 1.0)
+
+
+class GetScaleMacosTests(unittest.TestCase):
+    @patch("tbp.interactive.utils.ctypes")
+    def test_returns_backing_scale_factor(self, mock_ctypes: MagicMock) -> None:
+        """When NSScreen.backingScaleFactor returns 2.0, return 2.0."""
+        mock_ctypes.util.find_library.return_value = "/usr/lib/libobjc.dylib"
+        mock_objc = MagicMock()
+        mock_ctypes.cdll.LoadLibrary.return_value = mock_objc
+
+        # Simulate the ctypes objc_msgSend calls
+        mock_objc.objc_getClass.return_value = 0xABCD  # NSScreen class
+        mock_objc.sel_registerName.side_effect = lambda s: s  # pass-through
+        # First call: mainScreen (returns pointer), second call: backingScaleFactor
+        mock_objc.objc_msgSend.side_effect = [0x1234, 2.0]
+
+        result = _get_scale_macos()
+        self.assertEqual(result, 2.0)
+
+    @patch("tbp.interactive.utils.ctypes")
+    def test_returns_one_when_objc_library_not_found(
+        self, mock_ctypes: MagicMock
+    ) -> None:
+        """When the objc library is not found, return 1.0."""
+        mock_ctypes.util.find_library.return_value = None
+        result = _get_scale_macos()
+        self.assertEqual(result, 1.0)
+
+    @patch("tbp.interactive.utils.ctypes")
+    def test_returns_one_when_main_screen_is_null(self, mock_ctypes: MagicMock) -> None:
+        """When mainScreen returns NULL, return 1.0."""
+        mock_ctypes.util.find_library.return_value = "/usr/lib/libobjc.dylib"
+        mock_objc = MagicMock()
+        mock_ctypes.cdll.LoadLibrary.return_value = mock_objc
+        mock_objc.objc_getClass.return_value = 0xABCD
+        mock_objc.sel_registerName.side_effect = lambda s: s
+        mock_objc.objc_msgSend.return_value = 0  # NULL mainScreen
+        result = _get_scale_macos()
+        self.assertEqual(result, 1.0)
+
+    @patch("tbp.interactive.utils.ctypes")
+    def test_returns_one_on_os_error(self, mock_ctypes: MagicMock) -> None:
+        """On OSError, return 1.0."""
+        mock_ctypes.util.find_library.side_effect = OSError("not found")
+        result = _get_scale_macos()
+        self.assertEqual(result, 1.0)
 
 
 class Location2DTests(unittest.TestCase):
