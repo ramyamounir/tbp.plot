@@ -9,6 +9,9 @@
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.util
+import platform
 import time
 from bisect import bisect_left
 from contextlib import suppress
@@ -26,33 +29,67 @@ if TYPE_CHECKING:
     from vedo import Plotter
 
 
-def get_display_scale(plotter: Plotter) -> float:
-    """Return the device pixel ratio for the plotter's render window.
+def get_display_scale(plotter: Plotter) -> float:  # noqa: ARG001
+    """Return the display scale factor for HiDPI / Retina displays.
 
-    On macOS Retina displays VTK's Cocoa render window uses a 2x backing
-    framebuffer.  Screen-pixel-dependent elements (buttons, Text2D, point
-    sizes, line widths) must be multiplied by this ratio so that they appear
-    at the intended physical size.
+    On macOS Retina displays the backing framebuffer uses 2x physical
+    pixels.  Screen-pixel-dependent elements (buttons, Text2D, point
+    sizes, line widths) must be multiplied by this ratio so that they
+    appear at the intended physical size.
 
-    Must be called **after** the window is realized (i.e., after at least
-    one ``plotter.render()`` or ``plotter.show()`` call) so that
-    ``GetDevicePixelRatio()`` returns the actual backing ratio rather than 1.
-
-    On Linux / X11, ``GetDevicePixelRatio()`` returns 1 (or the method may
-    be absent in older VTK builds), so this function returns 1.0 and no
-    scaling occurs.
+    Detection uses ``NSScreen.backingScaleFactor()`` via the Objective-C
+    runtime on macOS (no extra dependencies).  On Linux the function
+    returns 1.0 because X11/Wayland scaling is handled at the compositor
+    level rather than per-window.
 
     Args:
-        plotter: A vedo Plotter whose render window has been realized.
+        plotter: A vedo Plotter (kept for API compatibility; detection
+            is platform-based rather than window-based).
 
     Returns:
-        The device pixel ratio as a float (1.0 on standard displays,
+        The display scale factor as a float (1.0 on standard displays,
         2.0 on Retina).
     """
-    window = plotter.window
-    if hasattr(window, "GetDevicePixelRatio"):
-        return float(window.GetDevicePixelRatio())
+    if platform.system() == "Darwin":
+        return _get_scale_macos()
     return 1.0
+
+
+def _get_scale_macos() -> float:
+    """Detect macOS Retina scale via NSScreen.backingScaleFactor.
+
+    Uses the Objective-C runtime through ctypes so that no additional
+    Python packages (e.g. pyobjc) are required.
+
+    Returns:
+        The backing scale factor (2.0 on Retina, 1.0 on standard).
+        Falls back to 1.0 on any error.
+    """
+    try:
+        objc_path = ctypes.util.find_library("objc")
+        if objc_path is None:
+            return 1.0
+        objc = ctypes.cdll.LoadLibrary(objc_path)
+
+        objc.objc_getClass.restype = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = ctypes.c_void_p
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.objc_msgSend.restype = ctypes.c_void_p
+        objc.objc_msgSend.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+
+        ns_screen = objc.objc_getClass(b"NSScreen")
+        main_screen = objc.objc_msgSend(ns_screen, objc.sel_registerName(b"mainScreen"))
+        if not main_screen:
+            return 1.0
+
+        objc.objc_msgSend.restype = ctypes.c_double
+        scale = objc.objc_msgSend(
+            main_screen, objc.sel_registerName(b"backingScaleFactor")
+        )
+        return float(scale)
+    except (OSError, TypeError, ValueError):
+        return 1.0
 
 
 @dataclass
