@@ -26,31 +26,33 @@ if TYPE_CHECKING:
     from vedo import Plotter
 
 
-def normalize_plotter_dpi(plotter: Plotter) -> None:
-    """Disable HiDPI backing so the plotter renders at standard resolution.
+def get_display_scale(plotter: Plotter) -> float:
+    """Return the device pixel ratio for the plotter's render window.
 
-    On macOS Retina displays, VTK's Cocoa render window uses a 2x backing
-    framebuffer (``wantsBestResolutionOpenGLSurface``).  This causes
-    text-based widgets (Button, Text2D) and screen-pixel sizes (point_size,
-    Points r) to appear at half their intended physical size, while slider
-    geometry self-corrects via ``GetSize()``.  No single DPI value fixes both.
+    On macOS Retina displays VTK's Cocoa render window uses a 2x backing
+    framebuffer.  Screen-pixel-dependent elements (buttons, Text2D, point
+    sizes, line widths) must be multiplied by this ratio so that they appear
+    at the intended physical size.
 
-    Disabling the high-resolution backing makes the render window use logical
-    pixel coordinates, matching a standard 72 DPI display.
+    Must be called **after** the window is realized (i.e., after at least
+    one ``plotter.render()`` or ``plotter.show()`` call) so that
+    ``GetDevicePixelRatio()`` returns the actual backing ratio rather than 1.
 
-    Must be called after creating the ``Plotter`` and **before** any
-    ``.render()`` or ``.show()`` call so that the setting takes effect
-    before the native window is realized.
-
-    On Linux / X11 this is a no-op because ``vtkXOpenGLRenderWindow`` does
-    not expose ``SetWantsBestResolution``.
+    On Linux / X11, ``GetDevicePixelRatio()`` returns 1 (or the method may
+    be absent in older VTK builds), so this function returns 1.0 and no
+    scaling occurs.
 
     Args:
-        plotter: A vedo Plotter whose render window will be configured.
+        plotter: A vedo Plotter whose render window has been realized.
+
+    Returns:
+        The device pixel ratio as a float (1.0 on standard displays,
+        2.0 on Retina).
     """
     window = plotter.window
-    if hasattr(window, "SetWantsBestResolution"):
-        window.SetWantsBestResolution(False)
+    if hasattr(window, "GetDevicePixelRatio"):
+        return float(window.GetDevicePixelRatio())
+    return 1.0
 
 
 @dataclass

@@ -28,7 +28,7 @@ from vedo import (
     settings,
 )
 
-from tbp.interactive.utils import normalize_plotter_dpi
+from tbp.interactive.utils import get_display_scale
 from tbp.plot.plots.stats import deserialize_json_chunks
 from tbp.plot.registry import attach_args, register
 
@@ -251,9 +251,15 @@ class GroundTruthSimulator:
         target_name: The current object name being visualized.
     """
 
-    def __init__(self, data_extractor: DataExtractor, renderer_ix: int = 0):
+    def __init__(
+        self,
+        data_extractor: DataExtractor,
+        renderer_ix: int = 0,
+        dpi_scale: float = 1.0,
+    ):
         self.data_extractor = data_extractor
         self.renderer_ix = renderer_ix
+        self.dpi_scale = dpi_scale
 
         self.target_object = None
         self.sensor_object = None
@@ -310,7 +316,7 @@ class GroundTruthSimulator:
 
         # Add title label if it hasn't been created
         if self.title_object is None:
-            title_obj = Text2D("Simulator", s=1.0).pos((0.44, 1))
+            title_obj = Text2D("Simulator", s=1.0 * self.dpi_scale).pos((0.44, 1))
             self.title_object = title_obj
             plotter.at(self.renderer_ix).add(title_obj)
 
@@ -323,7 +329,9 @@ class GroundTruthSimulator:
 
         # Add or update the viewing ray line
         if self.line_object is None:
-            line_obj = Line(sensor_pos, patch_loc, c="black", lw=2)
+            line_obj = Line(
+                sensor_pos, patch_loc, c="black", lw=int(2 * self.dpi_scale)
+            )
             self.line_object = line_obj
             plotter.at(self.renderer_ix).add(line_obj)
         self.line_object.points = [sensor_pos, patch_loc]
@@ -355,9 +363,15 @@ class MlhSimulator:
         mlh_name: The currently displayed MLH object name.
     """
 
-    def __init__(self, data_extractor: DataExtractor, renderer_ix: int = 0):
+    def __init__(
+        self,
+        data_extractor: DataExtractor,
+        renderer_ix: int = 0,
+        dpi_scale: float = 1.0,
+    ):
         self.data_extractor = data_extractor
         self.renderer_ix = renderer_ix
+        self.dpi_scale = dpi_scale
 
         self.mlh_object = None
         self.loc_object = None
@@ -414,7 +428,9 @@ class MlhSimulator:
 
         # Add title once if it doesn't exist
         if self.title_object is None:
-            title_obj = Text2D("Most Likely Hypothesis", s=1.0).pos((0.38, 1))
+            title_obj = Text2D("Most Likely Hypothesis", s=1.0 * self.dpi_scale).pos(
+                (0.38, 1)
+            )
             self.title_object = title_obj
             plotter.at(self.renderer_ix).add(title_obj)
 
@@ -446,9 +462,15 @@ class EvidencePlot:
         added_plot_flag: Whether the static elements (lines and background) were added.
     """
 
-    def __init__(self, data_extractor: DataExtractor, renderer_ix: int = 0):
+    def __init__(
+        self,
+        data_extractor: DataExtractor,
+        renderer_ix: int = 0,
+        dpi_scale: float = 1.0,
+    ):
         self.data_extractor = data_extractor
         self.renderer_ix = renderer_ix
+        self.dpi_scale = dpi_scale
 
         self.classes: dict[str, list[float]] = self.data_extractor.classes
         self.target_transitions: list[int] = self.data_extractor.target_transitions
@@ -510,11 +532,20 @@ class EvidencePlot:
             evidence_scores = self.classes[obj]
             steps = np.arange(len(evidence_scores))
             pts = np.c_[steps, evidence_scores, np.zeros_like(steps)]
-            line = Line(pts, c=colors.get(obj, (0.5, 0.5, 0.5)), lw=3)
+            line = Line(
+                pts,
+                c=colors.get(obj, (0.5, 0.5, 0.5)),
+                lw=int(3 * self.dpi_scale),
+            )
             self.lines.append(line)
 
         # Add dynamic guide line. This will be modified with the plot slider.
-        self.guide_line = Line(p0=(0, 0, 0), p1=(0, 80, 0), lw=2, c="black")
+        self.guide_line = Line(
+            p0=(0, 0, 0),
+            p1=(0, 80, 0),
+            lw=int(2 * self.dpi_scale),
+            c="black",
+        )
         self.added_plot_flag = False
 
     def axes_dict(self) -> dict[str, Any]:
@@ -601,19 +632,28 @@ class InteractivePlot:
 
         self.data_extractor = DataExtractor(exp_path, data_path, learning_module)
 
-        self.gt_sim = GroundTruthSimulator(
-            data_extractor=self.data_extractor, renderer_ix=1
-        )
-
-        self.mlh_sim = MlhSimulator(data_extractor=self.data_extractor, renderer_ix=2)
-
-        self.evidence_plotter = EvidencePlot(
-            data_extractor=self.data_extractor, renderer_ix=0
-        )
-
         # Create a plotter with 3 renderers (2 on top, 1 on bottom)
         self.plotter = Plotter(shape="2/1", size=(1000, 1000), sharecam=False)
-        normalize_plotter_dpi(self.plotter)
+        self.plotter.render()
+        self.dpi_scale = get_display_scale(self.plotter)
+
+        self.gt_sim = GroundTruthSimulator(
+            data_extractor=self.data_extractor,
+            renderer_ix=1,
+            dpi_scale=self.dpi_scale,
+        )
+
+        self.mlh_sim = MlhSimulator(
+            data_extractor=self.data_extractor,
+            renderer_ix=2,
+            dpi_scale=self.dpi_scale,
+        )
+
+        self.evidence_plotter = EvidencePlot(
+            data_extractor=self.data_extractor,
+            renderer_ix=0,
+            dpi_scale=self.dpi_scale,
+        )
 
         # Create a slider on the plot
         self.slider = self.plotter.at(0).add_slider(
@@ -633,7 +673,7 @@ class InteractivePlot:
             self.simulator_callback,
             pos=(0.1, 0.9),
             states=["Align"],
-            size=30,
+            size=int(30 * self.dpi_scale),
             font="Calco",
             bold=True,
         )
@@ -641,7 +681,7 @@ class InteractivePlot:
             self.mlh_callback,
             pos=(0.9, 0.9),
             states=["Align"],
-            size=30,
+            size=int(30 * self.dpi_scale),
             font="Calco",
             bold=True,
         )

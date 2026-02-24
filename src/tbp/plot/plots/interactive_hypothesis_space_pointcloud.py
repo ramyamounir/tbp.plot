@@ -38,7 +38,7 @@ from tbp.interactive.data import (
 from tbp.interactive.topics import TopicMessage, TopicSpec
 from tbp.interactive.utils import (
     Location3D,
-    normalize_plotter_dpi,
+    get_display_scale,
 )
 from tbp.interactive.widget_updaters import WidgetUpdater
 from tbp.interactive.widgets import (
@@ -161,11 +161,16 @@ class GtMeshWidgetOps:
     """
 
     def __init__(
-        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+        self,
+        plotter: Plotter,
+        data_parser: DataParser,
+        ycb_loader: YCBMeshLoader,
+        dpi_scale: float = 1.0,
     ):
         self.plotter = plotter
         self.data_parser = data_parser
         self.ycb_loader = ycb_loader
+        self.dpi_scale = dpi_scale
         self.updaters = [
             WidgetUpdater(
                 topics=[
@@ -350,7 +355,10 @@ class GtMeshWidgetOps:
 
         if self.gaze_line is None:
             self.gaze_line = Line(
-                agent_pos, patch_pos, c=COLOR_PALETTE["Accent3"], lw=4
+                agent_pos,
+                patch_pos,
+                c=COLOR_PALETTE["Accent3"],
+                lw=int(4 * self.dpi_scale),
             )
             self.plotter.at(1).add(self.gaze_line)
         self.gaze_line.points = [agent_pos, patch_pos]
@@ -409,7 +417,9 @@ class GtMeshWidgetOps:
 
             # Create a polyline connecting all points
             if len(points) >= 2:
-                self.agent_path_line = Line(points, c=COLOR_PALETTE["Secondary"], lw=1)
+                self.agent_path_line = Line(
+                    points, c=COLOR_PALETTE["Secondary"], lw=int(1 * self.dpi_scale)
+                )
                 self.plotter.at(1).add(self.agent_path_line)
 
         self.plotter.at(1).render()
@@ -455,7 +465,9 @@ class GtMeshWidgetOps:
 
             # Create a thin black polyline connecting all patch positions
             if len(points) >= 2:
-                self.patch_path_line = Line(points, c=COLOR_PALETTE["Accent3"], lw=1)
+                self.patch_path_line = Line(
+                    points, c=COLOR_PALETTE["Accent3"], lw=int(1 * self.dpi_scale)
+                )
                 self.plotter.at(1).add(self.patch_path_line)
 
         self.plotter.at(1).render()
@@ -518,7 +530,7 @@ class AgentPathButtonWidgetOps:
     and it is published on the topic `agent_path_button`.
     """
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -526,7 +538,7 @@ class AgentPathButtonWidgetOps:
             "states": ["Agent Path: On", "Agent Path: Off"],
             "c": ["w", "w"],
             "bc": [COLOR_PALETTE["Primary"], COLOR_PALETTE["Secondary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -557,7 +569,7 @@ class PatchPathButtonWidgetOps:
     and it is published on the topic `patch_path_button`.
     """
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -565,7 +577,7 @@ class PatchPathButtonWidgetOps:
             "states": ["Patch Path: On", "Patch Path: Off"],
             "c": ["w", "w"],
             "bc": [COLOR_PALETTE["Primary"], COLOR_PALETTE["Secondary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -602,10 +614,12 @@ class HypSpaceWidgetOps:
         plotter: Plotter,
         data_parser: DataParser,
         models_loader: PretrainedModelsLoader,
+        dpi_scale: float = 1.0,
     ):
         self.plotter = plotter
         self.data_parser = data_parser
         self.models_loader = models_loader
+        self.dpi_scale = dpi_scale
 
         self.updaters = [
             WidgetUpdater(
@@ -744,7 +758,9 @@ class HypSpaceWidgetOps:
         rot = Rotation.from_quat(np.array(target_rot), scalar_first=True)
         rot_euler = rot.as_euler("xyz", degrees=True)
 
-        pts = Points(np.array(locations), r=6, c=COLOR_PALETTE["Secondary"])
+        pts = Points(
+            np.array(locations), r=int(6 * self.dpi_scale), c=COLOR_PALETTE["Secondary"]
+        )
         pts.rotate_x(rot_euler[0])
         pts.rotate_y(rot_euler[1])
         pts.rotate_z(rot_euler[2])
@@ -803,7 +819,7 @@ class HypSpaceWidgetOps:
 class ModelButtonWidgetOps:
     """WidgetOps implementation for showing/hiding the pretrained model point cloud."""
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -811,7 +827,7 @@ class ModelButtonWidgetOps:
             "states": ["Pretrained Model: On", "Pretrained Model: Off"],
             "c": ["w", "w"],
             "bc": [COLOR_PALETTE["Primary"], COLOR_PALETTE["Secondary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -837,7 +853,7 @@ class ModelButtonWidgetOps:
 class HypScopeButtonWidgetOps:
     """WidgetOps implementation for showing/hiding the hypothesis space."""
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -845,7 +861,7 @@ class HypScopeButtonWidgetOps:
             "states": ["Hypotheses: On", "Hypotheses: Off"],
             "c": ["w", "w"],
             "bc": [COLOR_PALETTE["Primary"], COLOR_PALETTE["Secondary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -876,7 +892,7 @@ class HypColorButtonWidgetOps:
     widget should be shown or hidden.
     """
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -891,7 +907,7 @@ class HypColorButtonWidgetOps:
                 COLOR_PALETTE["Gold"],
                 COLOR_PALETTE["Green"],
             ],
-            "size": FONT_SIZE - 5,
+            "size": int((FONT_SIZE - 5) * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -1423,8 +1439,8 @@ class InteractivePlot:
         self.models_loader = PretrainedModelsLoader(models_path)
         self.event_bus = Publisher()
         self.plotter = Plotter(shape=renderer_areas, sharecam=False)
-        normalize_plotter_dpi(self.plotter)
         self.plotter.render()
+        self.dpi_scale = get_display_scale(self.plotter)
         self.scheduler = VtkDebounceScheduler(self.plotter.interactor, period_ms=33)
         self.animator = None
 
@@ -1482,6 +1498,7 @@ class InteractivePlot:
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 ycb_loader=self.ycb_loader,
+                dpi_scale=self.dpi_scale,
             ),
             scopes=[1],
             bus=self.event_bus,
@@ -1502,7 +1519,9 @@ class InteractivePlot:
         )
 
         widgets["agent_path_button"] = Widget[Button, str](
-            widget_ops=AgentPathButtonWidgetOps(plotter=self.plotter),
+            widget_ops=AgentPathButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[1],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -1511,7 +1530,9 @@ class InteractivePlot:
         )
 
         widgets["patch_path_button"] = Widget[Button, str](
-            widget_ops=PatchPathButtonWidgetOps(plotter=self.plotter),
+            widget_ops=PatchPathButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[1],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -1524,6 +1545,7 @@ class InteractivePlot:
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 models_loader=self.models_loader,
+                dpi_scale=self.dpi_scale,
             ),
             scopes=[1],
             bus=self.event_bus,
@@ -1533,7 +1555,9 @@ class InteractivePlot:
         )
 
         widgets["model_button"] = Widget[Button, str](
-            widget_ops=ModelButtonWidgetOps(plotter=self.plotter),
+            widget_ops=ModelButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[1],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -1542,7 +1566,9 @@ class InteractivePlot:
         )
 
         widgets["hyp_color_button"] = Widget[Button, str](
-            widget_ops=HypColorButtonWidgetOps(plotter=self.plotter),
+            widget_ops=HypColorButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[1],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -1551,7 +1577,9 @@ class InteractivePlot:
         )
 
         widgets["hyp_scope_button"] = Widget[Button, str](
-            widget_ops=HypScopeButtonWidgetOps(plotter=self.plotter),
+            widget_ops=HypScopeButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[1],
             bus=self.event_bus,
             scheduler=self.scheduler,

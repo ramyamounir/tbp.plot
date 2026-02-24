@@ -54,7 +54,7 @@ from tbp.interactive.utils import (
     CoordinateMapper,
     Location2D,
     Location3D,
-    normalize_plotter_dpi,
+    get_display_scale,
     rotate_about_pivot,
     trace_hypothesis_backward,
     trace_hypothesis_forward,
@@ -362,11 +362,16 @@ class GtMeshWidgetOps:
     """
 
     def __init__(
-        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+        self,
+        plotter: Plotter,
+        data_parser: DataParser,
+        ycb_loader: YCBMeshLoader,
+        dpi_scale: float = 1.0,
     ):
         self.plotter = plotter
         self.data_parser = data_parser
         self.ycb_loader = ycb_loader
+        self.dpi_scale = dpi_scale
         self.updaters = [
             WidgetUpdater(
                 topics=[
@@ -394,7 +399,7 @@ class GtMeshWidgetOps:
         self.gaze_line: Line | None = None
         self.agent_sphere: Sphere | None = None
         self.text_label: Text2D = Text2D(
-            txt="Ground Truth", pos="top-center", font=FONT
+            txt="Ground Truth", pos="top-center", s=1.0 * dpi_scale, font=FONT
         )
 
         # Path visibility flags
@@ -586,7 +591,10 @@ class GtMeshWidgetOps:
 
         if self.gaze_line is None:
             self.gaze_line = Line(
-                agent_pos, patch_pos, c=COLOR_PALETTE["Accent3"], lw=4
+                agent_pos,
+                patch_pos,
+                c=COLOR_PALETTE["Accent3"],
+                lw=int(4 * self.dpi_scale),
             )
             self.plotter.at(1).add(self.gaze_line)
         self.gaze_line.points = [agent_pos, patch_pos]
@@ -649,7 +657,7 @@ class GtMeshWidgetOps:
                 self.agent_past_spheres.append(s)
             if len(past_pts) >= 2:
                 self.agent_past_line = Line(
-                    past_pts, c=COLOR_PALETTE["Secondary"], lw=1
+                    past_pts, c=COLOR_PALETTE["Secondary"], lw=int(1 * self.dpi_scale)
                 )
                 self.plotter.at(1).add(self.agent_past_line)
 
@@ -665,7 +673,7 @@ class GtMeshWidgetOps:
                 self.agent_future_spheres.append(s)
             if len(future_pts) >= 2:
                 self.agent_future_line = Line(
-                    future_pts, c=COLOR_PALETTE["Secondary"], lw=1
+                    future_pts, c=COLOR_PALETTE["Secondary"], lw=int(1 * self.dpi_scale)
                 )
                 self.plotter.at(1).add(self.agent_future_line)
 
@@ -692,7 +700,9 @@ class GtMeshWidgetOps:
                 self.plotter.at(1).add(s)
                 self.patch_past_spheres.append(s)
             if len(past_pts) >= 2:
-                self.patch_past_line = Line(past_pts, c=COLOR_PALETTE["Accent3"], lw=1)
+                self.patch_past_line = Line(
+                    past_pts, c=COLOR_PALETTE["Accent3"], lw=int(1 * self.dpi_scale)
+                )
                 self.plotter.at(1).add(self.patch_past_line)
 
         if (
@@ -707,7 +717,7 @@ class GtMeshWidgetOps:
                 self.patch_future_spheres.append(s)
             if len(future_pts) >= 2:
                 self.patch_future_line = Line(
-                    future_pts, c=COLOR_PALETTE["Accent2"], lw=1
+                    future_pts, c=COLOR_PALETTE["Accent2"], lw=int(1 * self.dpi_scale)
                 )
                 self.plotter.at(1).add(self.patch_future_line)
 
@@ -745,7 +755,7 @@ class PrimaryButtonWidgetOps:
         _add_kwargs: Default keyword arguments passed to `plotter.add_button`.
     """
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -753,7 +763,7 @@ class PrimaryButtonWidgetOps:
             "states": ["Primary Target"],
             "c": ["w"],
             "bc": [COLOR_PALETTE["Primary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -797,7 +807,7 @@ class PrevButtonWidgetOps:
         _add_kwargs: Default keyword arguments passed to `plotter.add_button`.
     """
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -805,7 +815,7 @@ class PrevButtonWidgetOps:
             "states": ["<"],
             "c": ["w"],
             "bc": [COLOR_PALETTE["Primary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -849,7 +859,7 @@ class NextButtonWidgetOps:
         _add_kwargs: Default keyword arguments passed to `plotter.add_button`.
     """
 
-    def __init__(self, plotter: Plotter):
+    def __init__(self, plotter: Plotter, dpi_scale: float = 1.0):
         self.plotter = plotter
 
         self._add_kwargs = {
@@ -857,7 +867,7 @@ class NextButtonWidgetOps:
             "states": [">"],
             "c": ["w"],
             "bc": [COLOR_PALETTE["Primary"]],
-            "size": FONT_SIZE,
+            "size": int(FONT_SIZE * dpi_scale),
             "font": FONT,
             "bold": False,
         }
@@ -1300,9 +1310,12 @@ class CorrelationPlotWidgetOps:
         _coordinate_mapper: Maps GUI pixel coordinates to data coordinates, and back.
     """
 
-    def __init__(self, plotter: Plotter, data_parser: DataParser) -> None:
+    def __init__(
+        self, plotter: Plotter, data_parser: DataParser, dpi_scale: float = 1.0
+    ) -> None:
         self.plotter = plotter
         self.data_parser = data_parser
+        self.dpi_scale = dpi_scale
         self.updaters = [
             WidgetUpdater(
                 topics=[
@@ -1755,7 +1768,9 @@ class CorrelationPlotWidgetOps:
                 f"Removed Hypotheses: {removed}"
             )
 
-        self.info_widget = Text2D(txt=text, pos="top-left", font=FONT)
+        self.info_widget = Text2D(
+            txt=text, pos="top-left", s=1.0 * self.dpi_scale, font=FONT
+        )
         self.plotter.at(0).add(self.info_widget)
 
     def add_mlh_circles(self, top_k: int) -> None:
@@ -1918,11 +1933,16 @@ class HypothesisMeshWidgetOps:
     """
 
     def __init__(
-        self, plotter: Plotter, data_parser: DataParser, ycb_loader: YCBMeshLoader
+        self,
+        plotter: Plotter,
+        data_parser: DataParser,
+        ycb_loader: YCBMeshLoader,
+        dpi_scale: float = 1.0,
     ) -> None:
         self.plotter = plotter
         self.data_parser = data_parser
         self.ycb_loader = ycb_loader
+        self.dpi_scale = dpi_scale
         self.updaters = [
             WidgetUpdater(
                 topics=[TopicSpec("clear_selected_hypothesis", required=True)],
@@ -1952,7 +1972,7 @@ class HypothesisMeshWidgetOps:
         self.default_object_position = (0, 1.5, 0)
         self.sensor_sphere: Sphere | None = None
         self.text_label: Text2D = Text2D(
-            txt="Selected Hypothesis", pos="top-center", font=FONT
+            txt="Selected Hypothesis", pos="top-center", s=1.0 * dpi_scale, font=FONT
         )
 
         # Path visibility states
@@ -2299,7 +2319,7 @@ class HypothesisMeshWidgetOps:
             spheres_list.append(s)
 
         if len(points) >= 2:
-            line = Line(points, c=color, lw=1)
+            line = Line(points, c=color, lw=int(1 * self.dpi_scale))
             setattr(self, line_attr, line)
             self.plotter.at(2).add(line)
 
@@ -2535,9 +2555,12 @@ class HypothesisLifespanWidgetOps:
     Display-only. Does not publish messages.
     """
 
-    def __init__(self, plotter: Plotter, data_parser: DataParser) -> None:
+    def __init__(
+        self, plotter: Plotter, data_parser: DataParser, dpi_scale: float = 1.0
+    ) -> None:
         self.plotter = plotter
         self.data_parser = data_parser
+        self.dpi_scale = dpi_scale
         self.updaters = [
             WidgetUpdater(
                 topics=[
@@ -2902,7 +2925,9 @@ class HypothesisLifespanWidgetOps:
             + f"Recent Evidence Change: {hyp['Evidence Slope']:.2f}\n"
             + f"Pose Error: {hyp['Pose Error']:.2f}"
         )
-        self.info_widget = Text2D(txt=info, pos="top-right", font=FONT)
+        self.info_widget = Text2D(
+            txt=info, pos="top-right", s=1.0 * self.dpi_scale, font=FONT
+        )
         self.plotter.at(0).add(self.info_widget)
 
     def update_plot(
@@ -3009,8 +3034,8 @@ class InteractivePlot:
         self.ycb_loader = YCBMeshLoader(data_path)
         self.event_bus = Publisher()
         self.plotter = Plotter(shape=renderer_areas, sharecam=False)
-        normalize_plotter_dpi(self.plotter)
         self.plotter.render()
+        self.dpi_scale = get_display_scale(self.plotter)
         self.scheduler = VtkDebounceScheduler(self.plotter.interactor, period_ms=33)
         self.animator = None
 
@@ -3076,6 +3101,7 @@ class InteractivePlot:
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 ycb_loader=self.ycb_loader,
+                dpi_scale=self.dpi_scale,
             ),
             scopes=[1],
             bus=self.event_bus,
@@ -3085,7 +3111,9 @@ class InteractivePlot:
         )
 
         widgets["primary_button"] = Widget[Button, str](
-            widget_ops=PrimaryButtonWidgetOps(plotter=self.plotter),
+            widget_ops=PrimaryButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[2, 3],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -3094,7 +3122,9 @@ class InteractivePlot:
         )
 
         widgets["prev_button"] = Widget[Button, str](
-            widget_ops=PrevButtonWidgetOps(plotter=self.plotter),
+            widget_ops=PrevButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[2, 3],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -3103,7 +3133,9 @@ class InteractivePlot:
         )
 
         widgets["next_button"] = Widget[Button, str](
-            widget_ops=NextButtonWidgetOps(plotter=self.plotter),
+            widget_ops=NextButtonWidgetOps(
+                plotter=self.plotter, dpi_scale=self.dpi_scale
+            ),
             scopes=[2, 3],
             bus=self.event_bus,
             scheduler=self.scheduler,
@@ -3153,7 +3185,9 @@ class InteractivePlot:
 
         widgets["correlation_plot"] = Widget[None, Series](
             widget_ops=CorrelationPlotWidgetOps(
-                plotter=self.plotter, data_parser=self.data_parser
+                plotter=self.plotter,
+                data_parser=self.data_parser,
+                dpi_scale=self.dpi_scale,
             ),
             scopes=[2],
             bus=self.event_bus,
@@ -3167,6 +3201,7 @@ class InteractivePlot:
                 plotter=self.plotter,
                 data_parser=self.data_parser,
                 ycb_loader=self.ycb_loader,
+                dpi_scale=self.dpi_scale,
             ),
             scopes=[3],
             bus=self.event_bus,
@@ -3191,6 +3226,7 @@ class InteractivePlot:
             widget_ops=HypothesisLifespanWidgetOps(
                 plotter=self.plotter,
                 data_parser=self.data_parser,
+                dpi_scale=self.dpi_scale,
             ),
             scopes=[3],
             bus=self.event_bus,

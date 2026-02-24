@@ -39,7 +39,7 @@ from vedo import (
     settings,
 )
 
-from tbp.interactive.utils import normalize_plotter_dpi
+from tbp.interactive.utils import get_display_scale
 from tbp.plot.plots.interactive_hypothesis_oorf_visualizer_utils.geometry import (
     get_custom_distances,
     rotate_pose_dependent_features,
@@ -275,7 +275,8 @@ class HypothesesOORFVisualizer:
             sharecam=False,
             title=f"Hypotheses Out of Reference Frame",
         )
-        normalize_plotter_dpi(self.plotter)
+        self.plotter.render()
+        self.dpi_scale = get_display_scale(self.plotter)
         # Add static elements to main renderer
         self._add_object_pointcloud()
         self._add_legend()
@@ -299,14 +300,14 @@ class HypothesesOORFVisualizer:
             self.resample_ellipsoid_callback,
             pos=(0.40, 0.14),
             states=[" Resample Hypothesis "],
-            size=20,
+            size=int(20 * self.dpi_scale),
             font="Calco",
         )
         self.pose_vectors_button = self.plotter.at(self.main_renderer_ix).add_button(
             self.toggle_pose_vectors_callback,
             pos=(0.6, 0.14),
             states=[" Show Pose Vectors ", " Hide Pose Vectors "],
-            size=20,
+            size=int(20 * self.dpi_scale),
             font="Calco",
         )
 
@@ -460,7 +461,7 @@ class HypothesesOORFVisualizer:
             self.object_model.object_points_wrt_world,
             c="gray",
         )
-        self.object_pointcloud.point_size(8)
+        self.object_pointcloud.point_size(int(8 * self.dpi_scale))
         self.plotter.at(self.main_renderer_ix).add(self.object_pointcloud)
 
     def _add_hypotheses_points(self) -> None:
@@ -478,13 +479,13 @@ class HypothesesOORFVisualizer:
 
         if len(inside_hypotheses) > 0:
             inside_points = Points(inside_hypotheses, c=TBP_COLORS["blue"])
-            inside_points.point_size(8)
+            inside_points.point_size(int(8 * self.dpi_scale))
             self.hypotheses_points.append(inside_points)
             self.plotter.at(self.main_renderer_ix).add(inside_points)
 
         if len(outside_hypotheses) > 0:
             outside_points = Points(outside_hypotheses, c=TBP_COLORS["pink"])
-            outside_points.point_size(3)
+            outside_points.point_size(int(3 * self.dpi_scale))
             self.hypotheses_points.append(outside_points)
             self.plotter.at(self.main_renderer_ix).add(outside_points)
 
@@ -603,7 +604,7 @@ class HypothesesOORFVisualizer:
         and changes when the hypothesis is resampled within a step.
         """
         hyp_point = Point(location, c="black")
-        hyp_point.point_size(25)
+        hyp_point.point_size(int(25 * self.dpi_scale))
         self.ellipsoid_center_point = hyp_point
         self.plotter.at(self.main_renderer_ix).add(hyp_point)
 
@@ -635,7 +636,7 @@ class HypothesesOORFVisualizer:
         nearest_node_points = Points(
             nearest_node_locs.squeeze(), c=TBP_COLORS["yellow"]
         )
-        nearest_node_points.point_size(15)
+        nearest_node_points.point_size(int(15 * self.dpi_scale))
         if is_heh:
             self.heh_neighbor_points.append(nearest_node_points)
         else:
@@ -748,7 +749,9 @@ class HypothesesOORFVisualizer:
         self.sm0_image = Image(rgb_patch)
         self.plotter.at(self.sm0_renderer_ix).add(self.sm0_image)
 
-        self.sm0_label = Text2D("SM_0", pos="top-center", c="black", font="Calco")
+        self.sm0_label = Text2D(
+            "SM_0", pos="top-center", s=1.0 * self.dpi_scale, c="black", font="Calco"
+        )
         self.plotter.at(self.sm0_renderer_ix).add(self.sm0_label)
 
         rgba_patch = self.current_sm1_rgba
@@ -757,7 +760,9 @@ class HypothesesOORFVisualizer:
         self.sm1_image = Image(rgb_patch)
         self.plotter.at(self.sm1_renderer_ix).add(self.sm1_image)
 
-        self.sm1_label = Text2D("SM_1", pos="top-center", c="black", font="Calco")
+        self.sm1_label = Text2D(
+            "SM_1", pos="top-center", s=1.0 * self.dpi_scale, c="black", font="Calco"
+        )
         self.plotter.at(self.sm1_renderer_ix).add(self.sm1_label)
 
     def _add_summary_text(self) -> None:
@@ -801,7 +806,7 @@ class HypothesesOORFVisualizer:
         self.summary_text = Text2D(
             combined_text,
             pos="top-left",
-            s=0.8,
+            s=0.8 * self.dpi_scale,
             font="Calco",
         )
         self.plotter.at(self.main_renderer_ix).add(self.summary_text)
@@ -837,7 +842,7 @@ class HypothesesOORFVisualizer:
         legend_title = Text2D(
             "Legend",
             pos=(0.02, 0.25),
-            s=0.8,
+            s=0.8 * self.dpi_scale,
             font="Calco",
             c="black",
         )
@@ -857,7 +862,7 @@ class HypothesesOORFVisualizer:
             item = Text2D(
                 text,
                 pos=(0.02, y_pos),
-                s=0.65,
+                s=0.65 * self.dpi_scale,
                 font="Courier",
                 c=color,
             )
