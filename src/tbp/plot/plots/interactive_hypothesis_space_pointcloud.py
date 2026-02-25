@@ -1014,7 +1014,7 @@ class LinePlotWidgetOps:
 
         return locators
 
-    def remove(self, widget: Mesh) -> None:
+    def remove(self, widget: vedo.visual.Actor2D) -> None:
         if widget is not None:
             self.plotter.at(0).remove(widget)
 
@@ -1103,7 +1103,7 @@ class LinePlotWidgetOps:
             }
         )
 
-    def _create_burst_figure(self, global_step: int) -> plt.Figure:
+    def _create_burst_figure(self, global_step: int) -> vedo.visual.Actor2D:
         df = self.df.copy()
 
         slopes = df["max_slope"].to_numpy(dtype=float)
@@ -1271,13 +1271,13 @@ class LinePlotWidgetOps:
 
         fig.tight_layout(rect=[0, 0, 1, 0.90])
 
-        widget = Image(fig)
+        image = Image(fig)
         plt.close(fig)
-        return widget
+        return image.clone2d(pos=(0.04, 0.08), size=0.58)
 
     def update_plot(
-        self, widget: Image, msgs: list[TopicMessage]
-    ) -> tuple[Image, bool]:
+        self, widget: vedo.visual.Actor2D, msgs: list[TopicMessage]
+    ) -> tuple[vedo.visual.Actor2D, bool]:
         self.remove(widget)
         msgs_dict = {msg.name: msg.value for msg in msgs}
         episode_number = msgs_dict["episode_number"]
@@ -1285,8 +1285,6 @@ class LinePlotWidgetOps:
         global_step = self.step_mapper.local_to_global(episode_number, step_number)
 
         widget = self._create_burst_figure(global_step)
-        widget.scale(0.5)
-        widget.pos(-400, -150, 0)
 
         self.plotter.at(0).add(widget)
         self.plotter.at(0).render()
@@ -1556,7 +1554,7 @@ class InteractivePlot:
             dedupe=True,
         )
 
-        widgets["line_plot"] = Widget[Image, str](
+        widgets["line_plot"] = Widget[vedo.visual.Actor2D, str](
             widget_ops=LinePlotWidgetOps(
                 plotter=self.plotter,
                 data_parser=self.data_parser,
